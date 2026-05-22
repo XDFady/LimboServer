@@ -6,3 +6,6 @@
 node_modules/
 *.zst
 .DS_Store
+/instances
+/logs
+/stressTesting

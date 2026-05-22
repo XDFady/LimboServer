@@ -201,6 +201,14 @@ pub fn send_play_packets(
         send_message(batch, component, protocol_version);
     }
 
+    if server_state.custom().captcha.enabled {
+        crate::custom::captcha::start_for_client(
+            client_state,
+            batch,
+            protocol_version,
+        ).map_err(|message| PacketHandlerError::custom(&message))?;
+    }
+
     let ticks = server_state.time_world_ticks();
     let lock_time = server_state.is_time_locked();
     let packet = UpdateTimePacket::new(ticks, !lock_time);

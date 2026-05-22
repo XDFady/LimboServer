@@ -13,11 +13,14 @@ use tracing::{Level, debug, error};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
+use crate::custom::CustomOptions;
+use crate::custom::mirror_status;
 
 pub async fn start_server(
     config_path: PathBuf,
     logging_level: u8,
     token: Option<&CancellationToken>,
+    custom_options: CustomOptions,
 ) -> ExitCode {
     enable_logging(logging_level);
     let Some(cfg) = load_configuration(&config_path) else {
@@ -26,8 +29,12 @@ pub async fn start_server(
 
     let bind = cfg.bind.clone();
 
-    match build_state(cfg) {
+    match build_state(cfg, custom_options) {
         Ok(server_state) => {
+            if let Some(mirror) = server_state.custom().mirror_status.clone() {
+                mirror_status::spawn_refresh_task(mirror);
+            }
+
             Server::new(&bind, server_state).run(token).await;
             ExitCode::SUCCESS
         }
@@ -58,7 +65,10 @@ fn load_configuration(config_path: &PathBuf) -> Option<Config> {
     None
 }
 
-fn build_state(cfg: Config) -> Result<ServerState, ServerStateBuilderError> {
+fn build_state(
+    cfg: Config,
+    custom_options: CustomOptions,
+) -> Result<ServerState, ServerStateBuilderError> {
     let mut server_state_builder = ServerState::builder();
 
     let forwarding: TaggedForwarding = cfg.forwarding.into();
@@ -133,7 +143,8 @@ fn build_state(cfg: Config) -> Result<ServerState, ServerStateBuilderError> {
         .set_allow_unsupported_versions(cfg.allow_unsupported_versions)
         .set_allow_flight(cfg.allow_flight)
         .set_accept_transfers(cfg.accept_transfers)
-        .server_commands(cfg.commands);
+        .server_commands(cfg.commands)
+        .custom(custom_options);
 
     server_state_builder.build()
 }

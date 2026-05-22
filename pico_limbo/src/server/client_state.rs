@@ -2,6 +2,7 @@ use crate::server::game_profile::GameProfile;
 use minecraft_packets::login::Property;
 use minecraft_protocol::prelude::{ProtocolVersion, State, Uuid};
 use tracing::info;
+use std::time::{Duration, Instant};
 
 #[derive(PartialEq, Eq)]
 pub enum KeepAliveStatus {
@@ -23,6 +24,10 @@ impl Default for ClientState {
             is_flight_allowed: false,
             is_flying: false,
             flying_speed: 0.05,
+            captcha_code: None,
+            captcha_attempts: 0,
+            captcha_verified: false,
+            captcha_started_at: None,
         }
     }
 }
@@ -38,6 +43,10 @@ pub struct ClientState {
     is_flight_allowed: bool,
     is_flying: bool,
     flying_speed: f32,
+    captcha_code: Option<String>,
+    captcha_attempts: u8,
+    captcha_verified: bool,
+    captcha_started_at: Option<Instant>,
 }
 
 impl ClientState {
@@ -176,5 +185,44 @@ impl ClientState {
 
     pub const fn set_flying_speed(&mut self, flying_speed: f32) {
         self.flying_speed = flying_speed;
+    }
+
+    // Custom captcha
+    pub fn start_captcha(&mut self, code: String) {
+        self.captcha_code = Some(code);
+        self.captcha_attempts = 0;
+        self.captcha_verified = false;
+        self.captcha_started_at = Some(Instant::now());
+    }
+
+    pub fn is_waiting_for_captcha(&self) -> bool {
+        self.captcha_code.is_some() && !self.captcha_verified
+    }
+
+    pub fn is_captcha_correct(&self, input: &str) -> bool {
+        self.captcha_code.as_deref() == Some(input)
+    }
+
+    pub fn add_captcha_attempt(&mut self) -> u8 {
+        self.captcha_attempts = self.captcha_attempts.saturating_add(1);
+        self.captcha_attempts
+    }
+
+    pub fn mark_captcha_verified(&mut self) {
+        self.captcha_verified = true;
+        self.captcha_code = None;
+        self.captcha_started_at = None;
+    }
+
+    pub fn has_captcha_timed_out(&self, timeout_seconds: u64) -> bool {
+        if !self.is_waiting_for_captcha() {
+            return false;
+        }
+
+        let Some(started_at) = self.captcha_started_at else {
+            return false;
+        };
+
+        started_at.elapsed() >= Duration::from_secs(timeout_seconds)
     }
 }

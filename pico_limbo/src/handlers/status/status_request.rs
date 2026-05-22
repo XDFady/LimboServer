@@ -7,6 +7,7 @@ use minecraft_packets::status::data::status_response::StatusResponse;
 use minecraft_packets::status::status_request_packet::StatusRequestPacket;
 use minecraft_packets::status::status_response_packet::StatusResponsePacket;
 use minecraft_protocol::prelude::ProtocolVersion;
+use pico_text_component::prelude::parse_mini_message;
 
 impl PacketHandler for StatusRequestPacket {
     fn handle(
@@ -29,14 +30,44 @@ impl PacketHandler for StatusRequestPacket {
                 )
             };
 
+        let mirror_snapshot = server_state
+            .custom()
+            .mirror_status
+            .as_ref()
+            .and_then(|mirror| mirror.snapshot());
+
+        let mirror_component = mirror_snapshot
+            .as_ref()
+            .and_then(|snapshot| parse_mini_message(&snapshot.motd).ok());
+
+        let (motd, online_players, max_players, favicon) =
+            if let (Some(snapshot), Some(component)) =
+                (mirror_snapshot.as_ref(), mirror_component.as_ref())
+            {
+                (
+                    component,
+                    snapshot.online_players,
+                    snapshot.max_players,
+                    snapshot.favicon.clone().or_else(|| server_state.fav_icon()),
+                )
+            } else {
+                (
+                    server_state.motd(),
+                    server_state.online_players(),
+                    server_state.max_players(),
+                    server_state.fav_icon(),
+                )
+            };
+
         let status_response = StatusResponse::new(
             version_string,
             version_number,
-            server_state.motd(),
-            server_state.online_players(),
-            server_state.max_players(),
-            server_state.fav_icon(),
+            motd,
+            online_players,
+            max_players,
+            favicon,
         );
+
         let packet = StatusResponsePacket::from_status_response(&status_response);
         batch.queue(|| PacketRegistry::StatusResponse(packet));
         Ok(batch)

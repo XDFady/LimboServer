@@ -7,6 +7,7 @@ mod kick_messages;
 mod server;
 mod server_brand;
 mod server_state;
+mod custom;
 
 use crate::cli::Cli;
 use clap::Parser;
@@ -15,5 +16,12 @@ use std::process::ExitCode;
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    server::start_server::start_server(cli.config_path, cli.verbose, None).await
+    let custom_options = cli.custom_options();
+
+    server::start_server::start_server(
+        cli.config_path,
+        cli.verbose,
+        None,
+        custom_options,
+    ).await
 }

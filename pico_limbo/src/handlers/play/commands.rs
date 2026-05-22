@@ -19,6 +19,15 @@ impl PacketHandler for ChatCommandPacket {
         server_state: &ServerState,
     ) -> Result<Batch<PacketRegistry>, PacketHandlerError> {
         let mut batch = Batch::new();
+
+        if crate::custom::captcha::block_command_if_waiting(
+            client_state,
+            &mut batch,
+            client_state.protocol_version(),
+        ) {
+            return Ok(batch);
+        }
+
         run_command(client_state, server_state, self.get_command(), &mut batch);
         Ok(batch)
     }
@@ -32,10 +41,26 @@ impl PacketHandler for ChatMessagePacket {
     ) -> Result<Batch<PacketRegistry>, PacketHandlerError> {
         let mut batch = Batch::new();
         if let Some(command) = self.get_command() {
+            if crate::custom::captcha::block_command_if_waiting(
+                client_state,
+                &mut batch,
+                client_state.protocol_version(),
+            ) {
+                return Ok(batch);
+            }
+
             run_command(client_state, server_state, command, &mut batch);
+        } else if crate::custom::captcha::handle_chat_message(
+            client_state,
+            server_state,
+            self.get_message(),
+            &mut batch,
+        ) {
+            return Ok(batch);
         } else {
             info!("<{}> {}", client_state.get_username(), self.get_message());
         }
+
         Ok(batch)
     }
 }

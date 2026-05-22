@@ -183,6 +183,15 @@ async fn process_packet(
         }
     }
 
+    {
+        let server_state_guard = server_state.read().await;
+
+        crate::custom::captcha::kick_if_expired(
+            &mut client_state,
+            &*server_state_guard,
+        );
+    }
+
     if let Some(reason) = client_state.should_kick() {
         drop(client_state);
         kick_client(client_data, reason.clone())

@@ -6,6 +6,7 @@ mod kick_messages;
 mod server;
 mod server_brand;
 mod server_state;
+mod custom;
 
 use crate::cli::Cli;
 use clap::Parser;
@@ -87,10 +88,12 @@ pub unsafe extern "C" fn start_app(
                 .build()
                 .unwrap();
 
+            let custom_options = cli.custom_options();
             let _ = rt.block_on(server::start_server::start_server(
                 cli.config_path,
                 cli.verbose,
                 Some(token),
+                custom_options,
             ));
         }
         Err(e) => {

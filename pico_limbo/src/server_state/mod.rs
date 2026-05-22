@@ -17,6 +17,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 use thiserror::Error;
 use tracing::debug;
+use crate::custom::CustomOptions;
 
 mod server_commands;
 
@@ -111,6 +112,7 @@ pub struct ServerState {
     allow_unsupported_versions: bool,
     allow_flight: bool,
     server_commands: ServerCommands,
+    custom: CustomOptions,
 }
 
 impl ServerState {
@@ -269,6 +271,10 @@ impl ServerState {
     pub fn decrement(&self) {
         self.connected_clients.fetch_sub(1, Ordering::SeqCst);
     }
+
+    pub const fn custom(&self) -> &CustomOptions {
+        &self.custom
+    }
 }
 
 #[derive(Default)]
@@ -303,6 +309,7 @@ pub struct ServerStateBuilder {
     allow_flight: bool,
     accept_transfers: bool,
     server_commands: ServerCommands,
+    custom: CustomOptions,
 }
 
 #[derive(Debug, Error)]
@@ -619,7 +626,13 @@ impl ServerStateBuilder {
             allow_flight: self.allow_flight,
             accept_transfers: self.accept_transfers,
             server_commands: self.server_commands,
+            custom: self.custom,
         })
+    }
+
+    pub fn custom(&mut self, custom: CustomOptions) -> &mut Self {
+        self.custom = custom;
+        self
     }
 }
 

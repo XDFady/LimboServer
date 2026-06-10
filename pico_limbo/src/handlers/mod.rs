@@ -1,3 +1,4 @@
+mod client_information;
 pub(crate) mod configuration;
 mod handshake;
 mod login;

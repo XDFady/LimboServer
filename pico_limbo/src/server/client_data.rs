@@ -6,7 +6,7 @@ use net::raw_packet::RawPacket;
 use std::ops::Add;
 use std::sync::Arc;
 use std::time::Duration;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tokio::time::Instant;
@@ -59,6 +59,44 @@ impl ClientData {
         self.stream().await.get_stream().shutdown().await?;
         self.interval().await.clear_interval().await;
         Ok(())
+    }
+
+    /// Gracefully closes the connection after a server-initiated disconnect
+    /// (e.g. a kick): half-closes the write side (sends FIN) and then drains any
+    /// data the client already sent.
+    ///
+    /// This matters because a Minecraft client keeps streaming packets (movement,
+    /// keep-alive responses). If that data is still unread when the socket is
+    /// closed, the OS aborts the connection with a TCP RST instead of a clean
+    /// FIN — and the RST makes the client display "Connection reset" instead of
+    /// the disconnect message (longer, e.g. translated, messages lose this race
+    /// more often). Draining first lets the disconnect packet be delivered.
+    ///
+    /// The drain is bounded so a client that never closes cannot hold the
+    /// connection open; well-behaved clients close right after the disconnect,
+    /// which ends the drain immediately via EOF.
+    // The stream guard is intentionally held for the whole drain (nothing else
+    // touches the stream once we are disconnecting), so tightening it is moot.
+    #[allow(clippy::significant_drop_tightening)]
+    pub async fn disconnect_gracefully(&self) {
+        {
+            let mut stream = self.stream().await;
+            let tcp = stream.get_stream();
+            // Flush the disconnect packet and send FIN on the write half.
+            let _ = tcp.shutdown().await;
+            // Drain client -> server data so closing does not trigger an RST.
+            let _ = tokio::time::timeout(Duration::from_secs(1), async {
+                let mut buf = [0u8; 1024];
+                loop {
+                    match tcp.read(&mut buf).await {
+                        Ok(0) | Err(_) => break, // EOF or error: nothing left to drain
+                        Ok(_) => {}              // discard and keep draining
+                    }
+                }
+            })
+            .await;
+        }
+        self.interval().await.clear_interval().await;
     }
 
     // Keep alive

@@ -32,6 +32,9 @@
       },
       "minecraft:select_known_packs": {
         "protocol_id": 7
+      },
+      "minecraft:client_information": {
+        "protocol_id": 0
       }
     }
   },
@@ -153,6 +156,9 @@
       },
       "minecraft:player_abilities": {
         "protocol_id": 35
+      },
+      "minecraft:client_information": {
+        "protocol_id": 10
       }
     }
   },

@@ -9,3 +9,5 @@ node_modules/
 /instances
 /logs
 /stressTesting
+.vscode/settings.json
+/lang

@@ -1,18 +1,25 @@
 use crate::handlers::configuration::send_message;
+use crate::i18n::LanguageMessages;
 use crate::server::batch::Batch;
 use crate::server::client_state::ClientState;
 use crate::server::packet_registry::PacketRegistry;
 use crate::server_state::ServerState;
 
-use minecraft_protocol::prelude::ProtocolVersion;
 use pico_text_component::prelude::{Component, MiniMessageError, parse_mini_message};
 use rand::RngExt;
+
+/// Brand prefix prepended to the success (reconnect) message.
+const BRAND_PREFIX: &str = "[PLETX]";
 
 #[derive(Clone)]
 pub struct CaptchaOptions {
     pub enabled: bool,
+    /// Optional override for the success message. Empty = use the built-in
+    /// translation for the player's language. The `[PLETX]` prefix is always added.
     pub success_kick_message: String,
+    /// Optional override for the failure message. Empty = use the translation.
     pub failed_kick_message: String,
+    /// Optional override for the timeout message. Empty = use the translation.
     pub timeout_kick_message: String,
     pub max_attempts: u8,
     pub timeout_seconds: u64,
@@ -22,18 +29,93 @@ impl Default for CaptchaOptions {
     fn default() -> Self {
         Self {
             enabled: false,
-            success_kick_message: "Verification successful. Please reconnect.".to_string(),
-            failed_kick_message: "Captcha failed. Please try again later.".to_string(),
-            timeout_kick_message: "Captcha timed out. Please try again.".to_string(),
+            // Empty => use the built-in translated message for the player's language.
+            success_kick_message: String::new(),
+            failed_kick_message: String::new(),
+            timeout_kick_message: String::new(),
             max_attempts: 3,
             timeout_seconds: 60,
         }
     }
 }
 
-struct GeneratedCaptcha {
-    prompt: Component,
-    answer: String,
+/// A simple, kid-friendly captcha challenge with a numeric answer. Numeric
+/// answers keep the challenge language-independent: only the short instruction
+/// label is translated. The variety of formats means a bot cannot pattern-match a
+/// single prompt shape, while each one is trivial for a human.
+enum Challenge {
+    /// Copy the shown number.
+    Copy(u32),
+    /// Add two small numbers.
+    Add(u32, u32),
+    /// Subtract (result is always positive).
+    Subtract(u32, u32),
+    /// Multiply two tiny numbers.
+    Multiply(u32, u32),
+    /// Type the bigger of two numbers.
+    Bigger(u32, u32),
+}
+
+impl Challenge {
+    fn random() -> Self {
+        let mut rng = rand::rng();
+        match rng.random_range(0..5) {
+            0 => Self::Copy(rng.random_range(1000..10000)),
+            1 => Self::Add(rng.random_range(1..10), rng.random_range(1..10)),
+            2 => {
+                let a = rng.random_range(6..20);
+                let b = rng.random_range(1..a);
+                Self::Subtract(a, b)
+            }
+            3 => Self::Multiply(rng.random_range(2..6), rng.random_range(2..6)),
+            _ => {
+                let a = rng.random_range(1..50);
+                let mut b = rng.random_range(1..50);
+                if b == a {
+                    b = if a > 1 { a - 1 } else { a + 1 };
+                }
+                Self::Bigger(a, b)
+            }
+        }
+    }
+
+    /// The expected (normalized) answer.
+    fn answer(&self) -> String {
+        match self {
+            Self::Copy(number) => number.to_string(),
+            Self::Add(a, b) => (a + b).to_string(),
+            Self::Subtract(a, b) => (a - b).to_string(),
+            Self::Multiply(a, b) => (a * b).to_string(),
+            Self::Bigger(a, b) => (*a).max(*b).to_string(),
+        }
+    }
+
+    /// Builds the minimal, localized prompt component.
+    fn prompt(&self, messages: &LanguageMessages) -> Result<Component, MiniMessageError> {
+        let body = match self {
+            Self::Copy(number) => format!(
+                "<yellow>{}</yellow> <green><bold>{number}</bold></green>",
+                messages.captcha_copy_label
+            ),
+            Self::Add(a, b) => format!(
+                "<yellow>{}</yellow> <green><bold>{a} + {b}</bold></green>",
+                messages.captcha_solve_label
+            ),
+            Self::Subtract(a, b) => format!(
+                "<yellow>{}</yellow> <green><bold>{a} - {b}</bold></green>",
+                messages.captcha_solve_label
+            ),
+            Self::Multiply(a, b) => format!(
+                "<yellow>{}</yellow> <green><bold>{a} × {b}</bold></green>",
+                messages.captcha_solve_label
+            ),
+            Self::Bigger(a, b) => format!(
+                "<yellow>{}</yellow> <green><bold>{a}   {b}</bold></green>",
+                messages.captcha_pick_bigger_label
+            ),
+        };
+        parse_mini_message(&body)
+    }
 }
 
 pub fn normalize_answer(input: &str) -> String {
@@ -45,246 +127,62 @@ pub fn normalize_answer(input: &str) -> String {
         .collect()
 }
 
-fn random_template(prompt_body: &str) -> String {
-    let mut rng = rand::rng();
-
-    let templates = [
-        format!(
-            "<dark_gray>--------------------</dark_gray>\n<yellow>Human check</yellow>\n{prompt_body}\n<gray>Type the answer in normal chat. Do not use /.</gray>\n<dark_gray>--------------------</dark_gray>"
-        ),
-        format!(
-            "<gold><bold>Verification Required</bold></gold>\n{prompt_body}\n<dark_gray>Only the final answer is accepted.</dark_gray>"
-        ),
-        format!(
-            "<gray>[AntiBot]</gray> <yellow>Solve this to continue:</yellow>\n{prompt_body}\n<red>Commands are blocked until verified.</red>"
-        ),
-        format!(
-            "<aqua>Security Check</aqua>\n{prompt_body}\n<gray>You have limited attempts.</gray>"
-        ),
-    ];
-
-    templates[rng.random_range(0..templates.len())].clone()
-}
-
-fn generate_number_challenge() -> Result<GeneratedCaptcha, MiniMessageError> {
-    let mut rng = rand::rng();
-
-    let number = rng.random_range(10000..99999).to_string();
-
-    let fake = rng.random_range(10000..99999).to_string();
-
-    let bodies = [
-        format!(
-            "<gray>Type this number:</gray> <green><bold>{number}</bold></green>\n<dark_gray>Ignore this fake code: {fake}</dark_gray>"
-        ),
-        format!(
-            "<gray>Answer with the green code only:</gray>\n<green><bold>{number}</bold></green> <dark_gray>{fake}</dark_gray>"
-        ),
-        format!(
-            "<gray>Copy the real code:</gray> <green>{number}</green>\n<red>Do not type:</red> <dark_gray>{fake}</dark_gray>"
-        ),
-    ];
-
-    let body = bodies[rng.random_range(0..bodies.len())].clone();
-
-    Ok(GeneratedCaptcha {
-        prompt: parse_mini_message(&random_template(&body))?,
-        answer: normalize_answer(&number),
-    })
-}
-
-fn generate_math_challenge() -> Result<GeneratedCaptcha, MiniMessageError> {
-    let mut rng = rand::rng();
-
-    let a = rng.random_range(3..25);
-    let b = rng.random_range(2..18);
-    let c = rng.random_range(1..10);
-
-    let mode = rng.random_range(0..4);
-
-    let (question, answer) = match mode {
-        0 => (format!("{a} + {b}"), a + b),
-        1 => (format!("{a} + {b} - {c}"), a + b - c),
-        2 => (format!("{a} × {b}"), a * b),
-        _ => {
-            let answer = a + c;
-            (format!("{} - {}", answer + b, b), answer)
-        }
+fn success_message(messages: &LanguageMessages, options: &CaptchaOptions) -> String {
+    let base = if options.success_kick_message.trim().is_empty() {
+        messages.captcha_success.clone()
+    } else {
+        options.success_kick_message.clone()
     };
-
-    let fake_answer = answer + rng.random_range(2..8);
-
-    let bodies = [
-        format!(
-            "<gray>Solve:</gray> <yellow><bold>{question}</bold></yellow>\n<dark_gray>Fake answer: {fake_answer}</dark_gray>"
-        ),
-        format!(
-            "<gray>Math check:</gray> <gold>{question}</gold>\n<gray>Type only the number result.</gray>"
-        ),
-        format!(
-            "<yellow>{question}</yellow>\n<gray>Send the result in chat.</gray>"
-        ),
-    ];
-
-    let body = bodies[rng.random_range(0..bodies.len())].clone();
-
-    Ok(GeneratedCaptcha {
-        prompt: parse_mini_message(&random_template(&body))?,
-        answer: normalize_answer(&answer.to_string()),
-    })
+    format!("{BRAND_PREFIX} {base}")
 }
 
-fn generate_reverse_challenge() -> Result<GeneratedCaptcha, MiniMessageError> {
-    let mut rng = rand::rng();
-
-    let charset = b"ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
-    let mut text = String::new();
-
-    for _ in 0..4 {
-        let index = rng.random_range(0..charset.len());
-        text.push(charset[index] as char);
-    }
-
-    let answer: String = text.chars().rev().collect();
-
-    let bodies = [
-        format!(
-            "<gray>Type this code backwards:</gray> <aqua><bold>{text}</bold></aqua>\n<dark_gray>Example: ABCD becomes DCBA</dark_gray>"
-        ),
-        format!(
-            "<gray>Reverse challenge:</gray> <aqua>{text}</aqua>\n<gray>Answer with the reversed text.</gray>"
-        ),
-    ];
-
-    let body = bodies[rng.random_range(0..bodies.len())].clone();
-
-    Ok(GeneratedCaptcha {
-        prompt: parse_mini_message(&random_template(&body))?,
-        answer: normalize_answer(&answer),
-    })
-}
-
-fn generate_word_pick_challenge() -> Result<GeneratedCaptcha, MiniMessageError> {
-    let mut rng = rand::rng();
-
-    let words = [
-        "apple", "stone", "river", "cloud", "torch", "pixel", "grass", "melon",
-    ];
-
-    let target = words[rng.random_range(0..words.len())];
-    let fake1 = words[rng.random_range(0..words.len())];
-    let fake2 = words[rng.random_range(0..words.len())];
-
-    let bodies = [
-        format!(
-            "<gray>Type the <green>GREEN</green> word only:</gray>\n<green><bold>{target}</bold></green> <red>{fake1}</red> <yellow>{fake2}</yellow>"
-        ),
-        format!(
-            "<gray>Only send the word in green:</gray>\n<red>{fake1}</red> <green>{target}</green> <dark_gray>{fake2}</dark_gray>"
-        ),
-    ];
-
-    let body = bodies[rng.random_range(0..bodies.len())].clone();
-
-    Ok(GeneratedCaptcha {
-        prompt: parse_mini_message(&random_template(&body))?,
-        answer: normalize_answer(target),
-    })
-}
-
-fn generate_position_challenge() -> Result<GeneratedCaptcha, MiniMessageError> {
-    let mut rng = rand::rng();
-
-    let words = ["wolf", "cake", "iron", "sand", "leaf", "book"];
-    let first = words[rng.random_range(0..words.len())];
-    let second = words[rng.random_range(0..words.len())];
-    let third = words[rng.random_range(0..words.len())];
-
-    let mode = rng.random_range(0..3);
-
-    let (position_text, answer) = match mode {
-        0 => ("first", first),
-        1 => ("second", second),
-        _ => ("third", third),
-    };
-
-    let body = format!(
-        "<gray>Type the <yellow>{position_text}</yellow> word:</gray>\n<aqua>{first}</aqua> <aqua>{second}</aqua> <aqua>{third}</aqua>"
-    );
-
-    Ok(GeneratedCaptcha {
-        prompt: parse_mini_message(&random_template(&body))?,
-        answer: normalize_answer(answer),
-    })
-}
-
-fn generate_challenge() -> Result<GeneratedCaptcha, MiniMessageError> {
-    let mut rng = rand::rng();
-
-    match rng.random_range(0..5) {
-        0 => generate_number_challenge(),
-        1 => generate_math_challenge(),
-        2 => generate_reverse_challenge(),
-        3 => generate_word_pick_challenge(),
-        _ => generate_position_challenge(),
+fn failed_message(messages: &LanguageMessages, options: &CaptchaOptions) -> String {
+    if options.failed_kick_message.trim().is_empty() {
+        messages.captcha_failed.clone()
+    } else {
+        options.failed_kick_message.clone()
     }
 }
 
-pub fn wrong_captcha_message(attempts_left: u8) -> Result<Component, MiniMessageError> {
-    let mut rng = rand::rng();
-
-    let templates = [
-        format!(
-            "<red>Wrong answer.</red> <gray>Attempts left: {attempts_left}</gray>"
-        ),
-        format!(
-            "<yellow>That was not correct.</yellow> <gray>{attempts_left} attempt(s) left.</gray>"
-        ),
-        format!(
-            "<red>Verification failed.</red> <dark_gray>Remaining: {attempts_left}</dark_gray>"
-        ),
-    ];
-
-    parse_mini_message(&templates[rng.random_range(0..templates.len())])
-}
-
-pub fn command_blocked_message() -> Result<Component, MiniMessageError> {
-    let mut rng = rand::rng();
-
-    let templates = [
-        "<yellow>Please solve the captcha in normal chat first.</yellow>",
-        "<red>Commands are disabled until you finish verification.</red>",
-        "<gray>Type the captcha answer directly in chat, without /.</gray>",
-    ];
-
-    parse_mini_message(templates[rng.random_range(0..templates.len())])
+fn timeout_message(messages: &LanguageMessages, options: &CaptchaOptions) -> String {
+    if options.timeout_kick_message.trim().is_empty() {
+        messages.captcha_timeout.clone()
+    } else {
+        options.timeout_kick_message.clone()
+    }
 }
 
 pub fn start_for_client(
     client_state: &mut ClientState,
+    server_state: &ServerState,
     batch: &mut Batch<PacketRegistry>,
-    protocol_version: ProtocolVersion,
 ) -> Result<(), String> {
-    let challenge = generate_challenge().map_err(|err| err.to_string())?;
+    let messages = server_state.resolve_messages(client_state.locale());
+    let protocol_version = client_state.protocol_version();
+    let challenge = Challenge::random();
+    let prompt = challenge.prompt(messages).map_err(|err| err.to_string())?;
 
-    client_state.start_captcha(challenge.answer);
-
-    send_message(batch, &challenge.prompt, protocol_version);
+    client_state.start_captcha(normalize_answer(&challenge.answer()));
+    send_message(batch, &prompt, protocol_version);
 
     Ok(())
 }
 
 pub fn block_command_if_waiting(
     client_state: &ClientState,
+    server_state: &ServerState,
     batch: &mut Batch<PacketRegistry>,
-    protocol_version: ProtocolVersion,
 ) -> bool {
     if !client_state.is_waiting_for_captcha() {
         return false;
     }
 
-    if let Ok(component) = command_blocked_message() {
-        send_message(batch, &component, protocol_version);
+    let messages = server_state.resolve_messages(client_state.locale());
+    if let Ok(component) = parse_mini_message(&format!(
+        "<yellow>{}</yellow>",
+        messages.captcha_command_blocked
+    )) {
+        send_message(batch, &component, client_state.protocol_version());
     }
 
     true
@@ -300,47 +198,168 @@ pub fn handle_chat_message(
         return false;
     }
 
+    let messages = server_state.resolve_messages(client_state.locale());
+    let options = &server_state.custom().captcha;
     let input = normalize_answer(message);
-    let captcha_options = &server_state.custom().captcha;
 
     if client_state.is_captcha_correct(&input) {
         client_state.mark_captcha_verified();
-        client_state.kick(&captcha_options.success_kick_message);
+        client_state.kick(&success_message(messages, options));
         return true;
     }
 
     let attempts = client_state.add_captcha_attempt();
-    let max_attempts = captcha_options.max_attempts.max(1);
+    let max_attempts = options.max_attempts.max(1);
 
     if attempts >= max_attempts {
-        client_state.kick(&captcha_options.failed_kick_message);
+        client_state.kick(&failed_message(messages, options));
         return true;
     }
 
     let attempts_left = max_attempts.saturating_sub(attempts);
-
-    if let Ok(component) = wrong_captcha_message(attempts_left) {
+    if let Ok(component) = parse_mini_message(&format!(
+        "<red>{}</red>",
+        messages.wrong_answer(attempts_left)
+    )) {
         send_message(batch, &component, client_state.protocol_version());
     }
 
     true
 }
 
-pub fn kick_if_expired(
-    client_state: &mut ClientState,
-    server_state: &ServerState,
-) {
-    if !server_state.custom().captcha.enabled {
+pub fn kick_if_expired(client_state: &mut ClientState, server_state: &ServerState) {
+    let options = &server_state.custom().captcha;
+    if !options.enabled || !client_state.is_waiting_for_captcha() {
         return;
     }
 
-    if !client_state.is_waiting_for_captcha() {
-        return;
+    if client_state.has_captcha_timed_out(options.timeout_seconds) {
+        let messages = server_state.resolve_messages(client_state.locale());
+        client_state.kick(&timeout_message(messages, options));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::i18n::{BUILTIN_LANGUAGES, Translations};
+
+    /// Exercises every challenge variant against every built-in language to make
+    /// sure each localized prompt parses as valid `MiniMessage`.
+    #[test]
+    fn challenges_and_messages_render_for_every_language() {
+        let translations = Translations::builtin("");
+        let challenges = [
+            Challenge::Copy(1234),
+            Challenge::Add(2, 3),
+            Challenge::Subtract(9, 4),
+            Challenge::Multiply(2, 3),
+            Challenge::Bigger(8, 3),
+        ];
+        for &code in BUILTIN_LANGUAGES {
+            let messages = translations.get(code);
+            for challenge in &challenges {
+                challenge
+                    .prompt(messages)
+                    .unwrap_or_else(|err| panic!("prompt failed for {code}: {err}"));
+            }
+            parse_mini_message(&format!("<yellow>{}</yellow>", messages.captcha_command_blocked))
+                .expect("command blocked message must parse");
+            parse_mini_message(&format!("<red>{}</red>", messages.wrong_answer(2)))
+                .expect("wrong answer message must parse");
+        }
     }
 
-    let timeout_seconds = server_state.custom().captcha.timeout_seconds;
+    #[test]
+    fn success_message_is_always_prefixed() {
+        let translations = Translations::builtin("");
+        let options = CaptchaOptions::default();
+        for &code in BUILTIN_LANGUAGES {
+            assert!(success_message(translations.get(code), &options).starts_with("[PLETX] "));
+        }
+        // Operator override is also prefixed.
+        let overridden = CaptchaOptions {
+            success_kick_message: "Custom done".to_string(),
+            ..CaptchaOptions::default()
+        };
+        assert_eq!(
+            success_message(translations.get("en"), &overridden),
+            "[PLETX] Custom done"
+        );
+    }
 
-    if client_state.has_captcha_timed_out(timeout_seconds) {
-        client_state.kick(&server_state.custom().captcha.timeout_kick_message);
+    #[test]
+    fn challenge_answers_are_correct() {
+        assert_eq!(Challenge::Copy(1234).answer(), "1234");
+        assert_eq!(Challenge::Add(2, 3).answer(), "5");
+        assert_eq!(Challenge::Subtract(9, 4).answer(), "5");
+        assert_eq!(Challenge::Multiply(2, 3).answer(), "6");
+        assert_eq!(Challenge::Bigger(8, 3).answer(), "8");
+        assert_eq!(Challenge::Bigger(3, 8).answer(), "8");
+    }
+
+    #[tokio::test]
+    async fn non_ascii_kick_survives_wire_codec() {
+        use minecraft_packets::play::disconnect_packet::DisconnectPacket;
+        use minecraft_protocol::prelude::ProtocolVersion;
+        use net::packet_stream::PacketStream;
+
+        let reason = "[PLETX] Doğrulandı! Lütfen tekrar bağlan. مرحبا";
+        let raw = PacketRegistry::PlayDisconnect(DisconnectPacket::text(reason))
+            .encode_packet(ProtocolVersion::V1_21)
+            .unwrap();
+        let expected = raw.bytes().to_vec();
+        eprintln!("V1_21 kick packet ({} bytes): {raw}", raw.size());
+
+        // Round-trip through the real wire codec (uncompressed).
+        let (a, b) = tokio::io::duplex(8192);
+        let mut writer = PacketStream::new(a);
+        let mut reader = PacketStream::new(b);
+        writer.write_packet(raw).await.unwrap();
+        let back = reader.read_packet().await.unwrap();
+        assert_eq!(back.bytes(), expected.as_slice(), "wire round-trip changed bytes");
+
+        // The exact UTF-8 bytes of the reason must appear intact inside the packet
+        // body (the NBT string is byte-length-prefixed, standard UTF-8).
+        let haystack = back.bytes();
+        let needle = reason.as_bytes();
+        assert!(
+            haystack.windows(needle.len()).any(|w| w == needle),
+            "reason bytes were not embedded intact in the packet"
+        );
+    }
+
+    #[test]
+    fn non_ascii_kick_and_prompt_encode_for_all_versions() {
+        use minecraft_packets::play::disconnect_packet::DisconnectPacket;
+        use minecraft_protocol::prelude::ProtocolVersion;
+
+        let reason = "[PLETX] Doğrulandı! Lütfen tekrar bağlan. مرحبا";
+        let versions = [
+            ProtocolVersion::V1_8,
+            ProtocolVersion::V1_16,
+            ProtocolVersion::V1_19,
+            ProtocolVersion::V1_20_2,
+            ProtocolVersion::V1_20_3,
+            ProtocolVersion::V1_21,
+            ProtocolVersion::V1_21_5,
+        ];
+
+        for pv in versions {
+            let kick = PacketRegistry::PlayDisconnect(DisconnectPacket::text(reason));
+            let encoded = kick.encode_packet(pv);
+            assert!(
+                encoded.is_ok(),
+                "kick encode failed for {pv:?}: {:?}",
+                encoded.err()
+            );
+
+            let translations = Translations::builtin("");
+            let prompt = Challenge::Copy(1234)
+                .prompt(translations.get("tr"))
+                .unwrap();
+            let mut batch = Batch::new();
+            send_message(&mut batch, &prompt, pv);
+        }
     }
 }

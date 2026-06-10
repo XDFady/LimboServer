@@ -2,6 +2,7 @@ mod cli;
 mod configuration;
 mod forwarding;
 mod handlers;
+mod i18n;
 mod kick_messages;
 mod server;
 mod server_brand;

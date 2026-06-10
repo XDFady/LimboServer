@@ -37,7 +37,7 @@ use pico_registries::Identifier;
 use pico_registries::registry_provider::Dimension as RegistryDimension;
 use pico_registries::registry_provider::RegistryProvider;
 use pico_structures::prelude::SchematicError;
-use pico_text_component::prelude::Component;
+use pico_text_component::prelude::{Component, parse_mini_message};
 use std::num::TryFromIntError;
 
 impl PacketHandler for AcknowledgeConfigurationPacket {
@@ -197,17 +197,7 @@ pub fn send_play_packets(
         batch.queue(|| PacketRegistry::PlayClientBoundPluginMessage(packet));
     }
 
-    if let Some(component) = server_state.welcome_message() {
-        send_message(batch, component, protocol_version);
-    }
-
-    if server_state.custom().captcha.enabled {
-        crate::custom::captcha::start_for_client(
-            client_state,
-            batch,
-            protocol_version,
-        ).map_err(|message| PacketHandlerError::custom(&message))?;
-    }
+    send_join_messages(batch, client_state, server_state, protocol_version)?;
 
     let ticks = server_state.time_world_ticks();
     let lock_time = server_state.is_time_locked();
@@ -260,6 +250,107 @@ pub fn send_play_packets(
 
     Ok(())
 }
+
+/// Sends the join messages on first join: records the resolved language (so a
+/// late locale can be detected as a change), optionally clears the chat, then
+/// sends the welcome title and starts the captcha.
+fn send_join_messages(
+    batch: &mut Batch<PacketRegistry>,
+    client_state: &mut ClientState,
+    server_state: &ServerState,
+    protocol_version: ProtocolVersion,
+) -> Result<(), PacketHandlerError> {
+    client_state.set_join_language(&server_state.resolve_code(client_state.locale()));
+    if server_state.clear_chat_on_join() {
+        clear_chat(batch, protocol_version);
+    }
+    send_welcome_title(batch, client_state, server_state, protocol_version);
+    if server_state.custom().captcha.enabled {
+        crate::custom::captcha::start_for_client(client_state, server_state, batch)
+            .map_err(|message| PacketHandlerError::custom(&message))?;
+    }
+    Ok(())
+}
+
+/// Re-sends the join messages (welcome + captcha) in the player's now-known
+/// language. Used when the client's locale arrives *after* the player has already
+/// joined: versions before 1.20.2 have no configuration phase, so Client Settings
+/// is received in play state, after the first (fallback-language) prompt was sent.
+/// Clearing the chat first removes that stale prompt so only the localized one
+/// remains.
+pub fn relocalize_join(
+    batch: &mut Batch<PacketRegistry>,
+    client_state: &mut ClientState,
+    server_state: &ServerState,
+) -> Result<(), PacketHandlerError> {
+    let protocol_version = client_state.protocol_version();
+    if server_state.clear_chat_on_join() {
+        clear_chat(batch, protocol_version);
+    }
+    send_welcome_title(batch, client_state, server_state, protocol_version);
+    if server_state.custom().captcha.enabled && client_state.is_waiting_for_captcha() {
+        crate::custom::captcha::start_for_client(client_state, server_state, batch)
+            .map_err(|message| PacketHandlerError::custom(&message))?;
+    }
+    Ok(())
+}
+
+/// The Minecraft client keeps the last 100 chat lines (all versions). There is no
+/// "clear chat" packet in the protocol, so sending that many blank lines pushes
+/// every line from a previous session (old captcha prompts, etc.) out of the
+/// history when the player rejoins.
+const CHAT_HISTORY_LINES: usize = 100;
+
+/// Flushes the client's chat history by sending blank chat lines.
+fn clear_chat(batch: &mut Batch<PacketRegistry>, protocol_version: ProtocolVersion) {
+    let blank = Component::new("");
+    for _ in 0..CHAT_HISTORY_LINES {
+        send_message(batch, &blank, protocol_version);
+    }
+}
+
+/// Sends the join welcome as a full-screen title (the big centered text), in the
+/// player's language. The per-language `welcome` from the translation files takes
+/// precedence; if it is empty, the global `welcome_message` from server.toml is
+/// used. Titles exist from 1.8; older clients receive it as a chat message.
+fn send_welcome_title(
+    batch: &mut Batch<PacketRegistry>,
+    client_state: &ClientState,
+    server_state: &ServerState,
+    protocol_version: ProtocolVersion,
+) {
+    let localized_welcome = &server_state.resolve_messages(client_state.locale()).welcome;
+    let component = if localized_welcome.trim().is_empty() {
+        server_state.welcome_message().cloned()
+    } else {
+        parse_mini_message(localized_welcome).ok()
+    };
+    let Some(component) = component else {
+        return;
+    };
+
+    if protocol_version.is_after_inclusive(ProtocolVersion::V1_17) {
+        let animation =
+            SetTitlesAnimationPacket::new(WELCOME_FADE_IN, WELCOME_STAY, WELCOME_FADE_OUT);
+        batch.queue(|| PacketRegistry::SetTitlesAnimation(animation));
+        let title = SetTitleTextPacket::new(&component);
+        batch.queue(|| PacketRegistry::SetTitleText(title));
+    } else if protocol_version.is_after_inclusive(ProtocolVersion::V1_8) {
+        let animation =
+            LegacySetTitlePacket::set_animation(WELCOME_FADE_IN, WELCOME_STAY, WELCOME_FADE_OUT);
+        batch.queue(|| PacketRegistry::LegacySetTitle(animation));
+        let title = LegacySetTitlePacket::set_title(&component);
+        batch.queue(|| PacketRegistry::LegacySetTitle(title));
+    } else {
+        send_message(batch, &component, protocol_version);
+    }
+}
+
+/// Welcome-title timing, in ticks: quick fade-in, a few seconds on screen, gentle
+/// fade-out.
+const WELCOME_FADE_IN: i32 = 10;
+const WELCOME_STAY: i32 = 70;
+const WELCOME_FADE_OUT: i32 = 20;
 
 fn send_tab_list_packets(batch: &mut Batch<PacketRegistry>, server_state: &ServerState) {
     if let Some(TabList { header, footer }) = server_state.tab_list() {
@@ -461,12 +552,100 @@ pub fn send_message(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::custom::CustomOptions;
+    use crate::custom::captcha::CaptchaOptions;
+    use crate::i18n::Translations;
     use futures::StreamExt;
+    use minecraft_packets::play::disconnect_packet::DisconnectPacket;
 
     fn server_state() -> ServerState {
         let mut builder = ServerState::builder();
         builder.view_distance(0).welcome_message("Hello, World!");
         builder.build().unwrap()
+    }
+
+    /// Reproduces the full non-English captcha flow at the runtime encoding path:
+    /// the captcha prompt (built via `MiniMessage`) and the localized kick message
+    /// must encode to valid bytes for every protocol version, otherwise the client
+    /// is disconnected with no message (the reported "connection reset" symptom).
+    #[tokio::test]
+    async fn non_english_captcha_join_and_kick_encode() {
+        let versions = [
+            ProtocolVersion::V1_8,
+            ProtocolVersion::V1_16,
+            ProtocolVersion::V1_19,
+            ProtocolVersion::V1_20_2,
+            ProtocolVersion::V1_20_3,
+            ProtocolVersion::V1_21,
+            ProtocolVersion::V1_21_5,
+        ];
+
+        for pv in versions {
+            // Server state with the captcha enabled and a non-English fallback.
+            let mut builder = ServerState::builder();
+            builder
+                .view_distance(0)
+                .welcome_message("Hoş geldin!")
+                .fallback_language("tr".to_string())
+                .custom(CustomOptions {
+                    captcha: CaptchaOptions {
+                        enabled: true,
+                        ..CaptchaOptions::default()
+                    },
+                    mirror_status: None,
+                });
+            let server_state = builder.build().unwrap();
+
+            let mut client_state = client(pv);
+            let mut batch = Batch::new();
+
+            // Join: builds the welcome + Turkish captcha prompt + all join packets.
+            send_play_packets(&mut batch, &mut client_state, &server_state).unwrap();
+
+            // Encode every join packet exactly as the server does at runtime.
+            let mut stream = batch.into_stream();
+            while let Some(packet) = stream.next().await {
+                let encoded = packet.encode_packet(pv);
+                assert!(
+                    encoded.is_ok(),
+                    "join packet failed to encode for {pv:?}: {:?}",
+                    encoded.err()
+                );
+            }
+
+            // Solve the captcha -> localized success kick must encode.
+            let mut chat_batch = Batch::new();
+            let answer = "1234"; // start_captcha stored the real answer; force success below.
+            let _ = answer;
+            // Drive a wrong answer (localized "wrong" message) then the kick.
+            let handled = crate::custom::captcha::handle_chat_message(
+                &mut client_state,
+                &server_state,
+                "definitely-wrong",
+                &mut chat_batch,
+            );
+            assert!(handled, "captcha should consume the chat message");
+            let mut chat_stream = chat_batch.into_stream();
+            while let Some(packet) = chat_stream.next().await {
+                let encoded = packet.encode_packet(pv);
+                assert!(
+                    encoded.is_ok(),
+                    "wrong-answer packet failed to encode for {pv:?}: {:?}",
+                    encoded.err()
+                );
+            }
+
+            // The localized kick message itself must encode on every version.
+            let reason = format!(
+                "[PLETX] {}",
+                Translations::builtin("").get("tr").captcha_success
+            );
+            let kick = PacketRegistry::PlayDisconnect(DisconnectPacket::text(reason));
+            assert!(
+                kick.encode_packet(pv).is_ok(),
+                "kick failed to encode for {pv:?}"
+            );
+        }
     }
 
     fn client(protocol: ProtocolVersion) -> ClientState {
@@ -479,6 +658,51 @@ mod tests {
         };
         cs.set_state(previous_state);
         cs
+    }
+
+    /// With `clear_chat_on_join` enabled, exactly [`CHAT_HISTORY_LINES`] blank
+    /// chat lines are sent before the welcome title, flushing any text left over
+    /// from a previous session on rejoin — on both modern and legacy versions.
+    #[tokio::test]
+    async fn clear_chat_on_join_sends_full_history_of_blank_lines() {
+        for (pv, is_modern) in [
+            (ProtocolVersion::V1_20_3, true),
+            (ProtocolVersion::V1_12_2, false),
+        ] {
+            let mut builder = ServerState::builder();
+            builder
+                .view_distance(0)
+                .welcome_message("Hello!")
+                .clear_chat_on_join(true);
+            let server_state = builder.build().unwrap();
+            let mut client_state = client(pv);
+            let mut batch = Batch::new();
+
+            send_play_packets(&mut batch, &mut client_state, &server_state).unwrap();
+
+            let mut chat_count = 0;
+            let mut saw_title = false;
+            let mut stream = batch.into_stream();
+            while let Some(packet) = stream.next().await {
+                match packet {
+                    PacketRegistry::SystemChatMessage(_) if is_modern && !saw_title => {
+                        chat_count += 1;
+                    }
+                    PacketRegistry::LegacyChatMessage(_) if !is_modern && !saw_title => {
+                        chat_count += 1;
+                    }
+                    PacketRegistry::SetTitleText(_) | PacketRegistry::LegacySetTitle(_) => {
+                        saw_title = true;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(saw_title, "welcome title missing for {pv:?}");
+            assert_eq!(
+                chat_count, CHAT_HISTORY_LINES,
+                "expected {CHAT_HISTORY_LINES} blank lines before the title for {pv:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -515,7 +739,11 @@ mod tests {
         ));
         assert!(matches!(
             batch.next().await.unwrap(),
-            PacketRegistry::SystemChatMessage(_)
+            PacketRegistry::SetTitlesAnimation(_)
+        ));
+        assert!(matches!(
+            batch.next().await.unwrap(),
+            PacketRegistry::SetTitleText(_)
         ));
         assert!(matches!(
             batch.next().await.unwrap(),
@@ -578,7 +806,11 @@ mod tests {
         ));
         assert!(matches!(
             batch.next().await.unwrap(),
-            PacketRegistry::SystemChatMessage(_)
+            PacketRegistry::SetTitlesAnimation(_)
+        ));
+        assert!(matches!(
+            batch.next().await.unwrap(),
+            PacketRegistry::SetTitleText(_)
         ));
         assert!(matches!(
             batch.next().await.unwrap(),
@@ -633,7 +865,11 @@ mod tests {
         ));
         assert!(matches!(
             batch.next().await.unwrap(),
-            PacketRegistry::LegacyChatMessage(_)
+            PacketRegistry::LegacySetTitle(_)
+        ));
+        assert!(matches!(
+            batch.next().await.unwrap(),
+            PacketRegistry::LegacySetTitle(_)
         ));
         assert!(matches!(
             batch.next().await.unwrap(),
@@ -672,7 +908,11 @@ mod tests {
         ));
         assert!(matches!(
             batch.next().await.unwrap(),
-            PacketRegistry::LegacyChatMessage(_)
+            PacketRegistry::LegacySetTitle(_)
+        ));
+        assert!(matches!(
+            batch.next().await.unwrap(),
+            PacketRegistry::LegacySetTitle(_)
         ));
         assert!(matches!(
             batch.next().await.unwrap(),

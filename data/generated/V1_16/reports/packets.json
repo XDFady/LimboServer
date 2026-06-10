@@ -93,6 +93,9 @@
       },
       "minecraft:player_abilities": {
         "protocol_id": 26
+      },
+      "minecraft:client_information": {
+        "protocol_id": 5
       }
     }
   },

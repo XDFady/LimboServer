@@ -28,6 +28,8 @@ impl Default for ClientState {
             captcha_attempts: 0,
             captcha_verified: false,
             captcha_started_at: None,
+            locale: None,
+            join_language: None,
         }
     }
 }
@@ -47,6 +49,8 @@ pub struct ClientState {
     captcha_attempts: u8,
     captcha_verified: bool,
     captcha_started_at: Option<Instant>,
+    locale: Option<String>,
+    join_language: Option<String>,
 }
 
 impl ClientState {
@@ -224,5 +228,30 @@ impl ClientState {
         };
 
         started_at.elapsed() >= Duration::from_secs(timeout_seconds)
+    }
+
+    // Locale (client language)
+
+    /// Stores the client's locale (e.g. `tr_tr`), reported by the Client
+    /// Information packet. Empty values are ignored.
+    pub fn set_locale(&mut self, locale: &str) {
+        if !locale.trim().is_empty() {
+            self.locale = Some(locale.to_owned());
+        }
+    }
+
+    pub fn locale(&self) -> Option<&str> {
+        self.locale.as_deref()
+    }
+
+    /// Language code the join messages (welcome/captcha) were last rendered in.
+    /// Used to detect when a late-arriving locale changes the language so the
+    /// messages can be re-localized.
+    pub fn set_join_language(&mut self, code: &str) {
+        self.join_language = Some(code.to_owned());
+    }
+
+    pub fn join_language(&self) -> Option<&str> {
+        self.join_language.as_deref()
     }
 }

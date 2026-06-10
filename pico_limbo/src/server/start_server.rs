@@ -4,9 +4,10 @@ use crate::configuration::config::{Config, ConfigError, load_or_create};
 use crate::configuration::tab_list::TabListMode;
 use crate::configuration::title::TitleConfig;
 use crate::configuration::world_config::boundaries::BoundariesConfig;
+use crate::i18n::{self, Translations};
 use crate::server::network::Server;
 use crate::server_state::{ServerState, ServerStateBuilderError};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use tokio_util::sync::CancellationToken;
 use tracing::{Level, debug, error};
@@ -70,6 +71,14 @@ fn build_state(
     custom_options: CustomOptions,
 ) -> Result<ServerState, ServerStateBuilderError> {
     let mut server_state_builder = ServerState::builder();
+
+    let fallback_language = i18n::parse_fallback(&cfg.i18n.fallback_language);
+
+    // Load the editable per-language translation files (created on first run).
+    // The global welcome_message seeds each file's `welcome` so it is visible and
+    // ready to translate.
+    let translations =
+        Translations::load_or_create(Path::new(&cfg.i18n.directory), &cfg.welcome_message)?;
 
     let forwarding: TaggedForwarding = cfg.forwarding.into();
 
@@ -144,6 +153,11 @@ fn build_state(
         .set_allow_flight(cfg.allow_flight)
         .set_accept_transfers(cfg.accept_transfers)
         .server_commands(cfg.commands)
+        .login_timeout(cfg.limits.login_timeout)
+        .read_timeout(cfg.limits.read_timeout)
+        .fallback_language(fallback_language)
+        .translations(translations)
+        .clear_chat_on_join(cfg.clear_chat_on_join)
         .custom(custom_options);
 
     server_state_builder.build()

@@ -23,6 +23,9 @@
       },
       "minecraft:finish_configuration": {
         "protocol_id": 2
+      },
+      "minecraft:client_information": {
+        "protocol_id": 0
       }
     }
   },
@@ -138,6 +141,9 @@
       },
       "minecraft:player_abilities": {
         "protocol_id": 31
+      },
+      "minecraft:client_information": {
+        "protocol_id": 9
       }
     }
   },

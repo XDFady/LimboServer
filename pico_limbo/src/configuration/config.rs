@@ -4,6 +4,8 @@ use crate::configuration::compression::CompressionConfig;
 use crate::configuration::env_placeholders::{EnvPlaceholderError, expand_env_placeholders};
 use crate::configuration::forwarding::ForwardingConfig;
 use crate::configuration::game_mode_config::GameModeConfig;
+use crate::configuration::i18n_config::I18nConfig;
+use crate::configuration::limits::LimitsConfig;
 use crate::configuration::server_list::ServerListConfig;
 use crate::configuration::tab_list::TabListConfig;
 use crate::configuration::title::TitleConfig;
@@ -49,6 +51,11 @@ pub struct Config {
     /// Message sent to the player after spawning in the world.
     pub welcome_message: String,
 
+    /// Clears the client's chat history when the player joins by sending blank
+    /// lines, so text from previous sessions (e.g. old captcha prompts) is no
+    /// longer visible after a rejoin.
+    pub clear_chat_on_join: bool,
+
     pub action_bar: String,
 
     /// Sets the default game mode for players
@@ -77,6 +84,10 @@ pub struct Config {
     pub title: TitleConfig,
 
     pub commands: CommandsConfig,
+
+    pub limits: LimitsConfig,
+
+    pub i18n: I18nConfig,
 }
 
 impl Default for Config {
@@ -85,6 +96,7 @@ impl Default for Config {
             bind: "0.0.0.0:25565".into(),
             server_list: ServerListConfig::default(),
             welcome_message: "Welcome to PicoLimbo!".into(),
+            clear_chat_on_join: true,
             action_bar: "Welcome to PicoLimbo!".into(),
             forwarding: ForwardingConfig::default(),
             default_game_mode: GameModeConfig::default(),
@@ -100,6 +112,8 @@ impl Default for Config {
             allow_flight: false,
             accept_transfers: false,
             commands: CommandsConfig::default(),
+            limits: LimitsConfig::default(),
+            i18n: I18nConfig::default(),
         }
     }
 }

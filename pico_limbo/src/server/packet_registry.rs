@@ -5,6 +5,7 @@ use crate::server_state::ServerState;
 use macros::PacketReport;
 use minecraft_packets::configuration::acknowledge_finish_configuration_packet::AcknowledgeConfigurationPacket;
 use minecraft_packets::configuration::client_bound_known_packs_packet::ClientBoundKnownPacksPacket;
+use minecraft_packets::configuration::client_information_packet::ClientInformationPacket;
 use minecraft_packets::configuration::configuration_client_bound_plugin_message_packet::ConfigurationClientBoundPluginMessagePacket;
 use minecraft_packets::configuration::finish_configuration_packet::FinishConfigurationPacket;
 use minecraft_packets::configuration::registry_data_packet::RegistryDataPacket;
@@ -164,6 +165,13 @@ pub enum PacketRegistry {
 
     #[protocol_id(
         state = "configuration",
+        bound = "serverbound",
+        name = "minecraft:client_information"
+    )]
+    ConfigurationClientInformation(ClientInformationPacket),
+
+    #[protocol_id(
+        state = "configuration",
         bound = "clientbound",
         name = "minecraft:custom_payload"
     )]
@@ -234,6 +242,13 @@ pub enum PacketRegistry {
 
     #[protocol_id(state = "play", bound = "serverbound", name = "minecraft:chat")]
     ChatMessage(ChatMessagePacket),
+
+    #[protocol_id(
+        state = "play",
+        bound = "serverbound",
+        name = "minecraft:client_information"
+    )]
+    PlayClientInformation(ClientInformationPacket),
 
     #[protocol_id(
         state = "play",
@@ -381,6 +396,9 @@ impl PacketHandler for PacketRegistry {
             Self::ChatMessage(packet) => packet.handle(client_state, server_state),
             Self::ServerBoundPlayerAbilities(packet) => packet.handle(client_state, server_state),
             Self::ServerBoundKnownPacks(packet) => packet.handle(client_state, server_state),
+            Self::ConfigurationClientInformation(packet) | Self::PlayClientInformation(packet) => {
+                packet.handle(client_state, server_state)
+            }
             _ => Err(PacketHandlerError::custom("Unhandled packet")),
         }
     }

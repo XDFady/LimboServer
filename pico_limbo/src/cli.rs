@@ -35,19 +35,22 @@ pub struct Cli {
     )]
     pub captcha: bool,
 
-    /// Message used when the player enters the captcha correctly
+    /// Message used when the player enters the captcha correctly.
+    /// Leave empty to use the built-in translation for the player's language.
+    /// The "[PLETX]" prefix is always added.
     #[arg(
         long = "success-kick-message",
         value_name = "MESSAGE",
-        default_value = "Verification successful. Please reconnect."
+        default_value = ""
     )]
     pub success_kick_message: String,
 
-    /// Message used when the player fails the captcha
+    /// Message used when the player fails the captcha.
+    /// Leave empty to use the built-in translation for the player's language.
     #[arg(
         long = "failed-kick-message",
         value_name = "MESSAGE",
-        default_value = "Captcha failed. Please try again later."
+        default_value = ""
     )]
     pub failed_kick_message: String,
 
@@ -91,11 +94,12 @@ pub struct Cli {
     )]
     pub captcha_timeout_seconds: u64,
 
-    /// Message used when the player does not solve captcha in time
+    /// Message used when the player does not solve captcha in time.
+    /// Leave empty to use the built-in translation for the player's language.
     #[arg(
         long = "captcha-timeout-kick-message",
         value_name = "MESSAGE",
-        default_value = "Captcha timed out. Please try again."
+        default_value = ""
     )]
     pub captcha_timeout_kick_message: String,
 }

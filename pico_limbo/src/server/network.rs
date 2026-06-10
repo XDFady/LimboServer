@@ -17,6 +17,7 @@ use std::sync::Arc;
 use thiserror::Error;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::RwLock;
+use tokio::time::Instant;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
@@ -125,16 +126,13 @@ impl From<TryFromIntError> for PacketProcessingError {
 }
 
 impl From<PacketStreamError> for PacketProcessingError {
-    fn from(value: PacketStreamError) -> Self {
-        match value {
-            PacketStreamError::Io(ref e)
-                if e.kind() == std::io::ErrorKind::UnexpectedEof
-                    || e.kind() == std::io::ErrorKind::ConnectionReset =>
-            {
-                Self::Disconnected
-            }
-            _ => Self::Custom(value.to_string()),
-        }
+    fn from(_: PacketStreamError) -> Self {
+        // Any stream/framing error is unrecoverable in a length-prefixed protocol:
+        // we cannot resynchronise mid-stream after a bad length, oversized packet,
+        // failed decompression, or a dead socket. Retrying would also spin the read
+        // loop at full CPU on a persistently broken stream and amplify logging under
+        // a flood. Drop the connection immediately instead.
+        Self::Disconnected
     }
 }
 
@@ -206,41 +204,96 @@ async fn process_packet(
     Ok(())
 }
 
+/// Waits for the next event on a connection: an inbound packet, a keep-alive
+/// tick, or the idle `deadline` elapsing.
+///
+/// Returns `Ok(true)` when an inbound packet was received (the caller should
+/// reset its idle deadline), `Ok(false)` after a keep-alive tick, and
+/// `Err(Disconnected)` when the idle `deadline` is reached.
 async fn read(
     client_data: &ClientData,
     server_state: &Arc<RwLock<ServerState>>,
     was_in_play_state: &mut bool,
-) -> Result<(), PacketProcessingError> {
+    deadline: Option<Instant>,
+) -> Result<bool, PacketProcessingError> {
     tokio::select! {
         result = client_data.read_packet() => {
             let raw_packet = result?;
             process_packet(client_data, server_state, raw_packet, was_in_play_state).await?;
+            Ok(true)
         }
         () = client_data.keep_alive_tick() => {
             send_keep_alive(client_data).await?;
+            Ok(false)
+        }
+        () = sleep_until_opt(deadline) => {
+            Err(PacketProcessingError::Disconnected)
         }
     }
-    Ok(())
+}
+
+/// Sleeps until `deadline`, or never resolves when no deadline is configured
+/// (timeout disabled). Used as a `select!` branch to bound connection idleness
+/// without arming a timer when the operator has disabled the timeout.
+async fn sleep_until_opt(deadline: Option<Instant>) {
+    match deadline {
+        Some(deadline) => tokio::time::sleep_until(deadline).await,
+        None => std::future::pending::<()>().await,
+    }
 }
 
 async fn handle_client(socket: TcpStream, server_state: Arc<RwLock<ServerState>>) {
+    // Minecraft traffic is many small packets; disabling Nagle's algorithm avoids
+    // up to ~40ms of added latency per write and keeps the proxy responsive.
+    let _ = socket.set_nodelay(true);
+
     let client_data = ClientData::new(socket);
     let mut was_in_play_state = false;
 
+    let (login_timeout, read_timeout) = {
+        let server_state = server_state.read().await;
+        (server_state.login_timeout(), server_state.read_timeout())
+    };
+
+    // Idle deadline based on the last *inbound* packet. Connections that send
+    // nothing within the timeout are dropped, which is the primary defence against
+    // slowloris / half-open connections piling up file descriptors and memory.
+    let mut last_activity = Instant::now();
+
     loop {
-        match read(&client_data, &server_state, &mut was_in_play_state).await {
-            Ok(()) => {}
+        let timeout = if was_in_play_state {
+            read_timeout
+        } else {
+            login_timeout
+        };
+        let deadline = timeout.map(|timeout| last_activity + timeout);
+
+        match read(&client_data, &server_state, &mut was_in_play_state, deadline).await {
+            Ok(received_packet) => {
+                // Only inbound packets reset the idle deadline; sending a keep-alive
+                // must not keep an otherwise-silent connection alive forever.
+                if received_packet {
+                    last_activity = Instant::now();
+                }
+            }
             Err(PacketProcessingError::Disconnected) => {
                 debug!("Client disconnected");
                 break;
             }
             Err(PacketProcessingError::Custom(e)) => {
+                // A single packet failed to handle, but the stream is still framed
+                // correctly. Keep the connection and count the received bytes as
+                // activity so a legitimate client is not wrongly timed out.
                 debug!("Error processing packet: {}", e);
+                last_activity = Instant::now();
             }
             Err(PacketProcessingError::DecodePacketError(version, state, packet_id)) => {
+                // Unknown packet: ignored per protocol leniency, but bytes were
+                // received, so it still counts as activity.
                 trace!(
                     "Unknown packet received: version={version} state={state} packet_id={packet_id}"
                 );
+                last_activity = Instant::now();
             }
         }
     }
@@ -282,7 +335,9 @@ async fn kick_client(
     };
     if let Ok(raw_packet) = packet.encode_packet(protocol_version) {
         client_data.write_packet(raw_packet).await?;
-        client_data.shutdown().await?;
+        // Drain the client before closing so the disconnect message is actually
+        // delivered instead of the connection being reset (RST) with unread data.
+        client_data.disconnect_gracefully().await;
     }
 
     Ok(())
@@ -301,4 +356,244 @@ async fn send_keep_alive(client_data: &ClientData) -> Result<(), PacketProcessin
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod e2e_tests {
+    use super::*;
+    use crate::custom::CustomOptions;
+    use crate::custom::captcha::CaptchaOptions;
+    use net::packet_stream::PacketStream;
+    use net::raw_packet::RawPacket;
+    use tokio::net::TcpStream;
+
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::cast_possible_wrap
+    )]
+    fn varint(mut value: i32) -> Vec<u8> {
+        let mut out = Vec::new();
+        loop {
+            if (value & !0x7f) == 0 {
+                out.push(value as u8);
+                return out;
+            }
+            out.push(((value & 0x7f) | 0x80) as u8);
+            value = ((value as u32) >> 7) as i32;
+        }
+    }
+
+    fn mc_string(s: &str) -> Vec<u8> {
+        let mut out = varint(i32::try_from(s.len()).unwrap());
+        out.extend_from_slice(s.as_bytes());
+        out
+    }
+
+    async fn write_raw(stream: &mut PacketStream<TcpStream>, id: u8, fields: &[u8]) {
+        stream
+            .write_packet(RawPacket::from_bytes(id, fields))
+            .await
+            .unwrap();
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
+    }
+
+    /// Full real-socket reproduction of the user's scenario: a 1.21 client with a
+    /// Turkish locale, captcha enabled, English kick-message overrides (as in
+    /// runMulti.sh). Verifies the Turkish captcha messages arrive intact over the
+    /// wire and the connection is never reset before the disconnect.
+    #[tokio::test]
+    async fn captcha_non_english_flow_over_real_socket() {
+        const PROTOCOL_1_21: i32 = 767;
+
+        // Server state mirroring the user's runMulti.sh configuration.
+        let mut builder = ServerState::builder();
+        builder
+            .view_distance(0)
+            .welcome_message("")
+            .fallback_language("tr".to_string())
+            .custom(CustomOptions {
+                captcha: CaptchaOptions {
+                    enabled: true,
+                    failed_kick_message: "Captcha failed. Please try again later.".to_string(),
+                    max_attempts: 3,
+                    ..CaptchaOptions::default()
+                },
+                mirror_status: None,
+            });
+        let server_state = Arc::new(RwLock::new(builder.build().unwrap()));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let server_state_clone = Arc::clone(&server_state);
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            handle_client(socket, server_state_clone).await;
+        });
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut cs = PacketStream::new(stream);
+
+        // Handshake (next state = login) + Login Start (name + uuid).
+        let mut hs = varint(PROTOCOL_1_21);
+        hs.extend(mc_string("127.0.0.1"));
+        hs.extend_from_slice(&addr.port().to_be_bytes());
+        hs.extend(varint(2));
+        write_raw(&mut cs, 0, &hs).await;
+
+        let mut login_start = mc_string("Tester");
+        login_start.extend_from_slice(&[0u8; 16]);
+        write_raw(&mut cs, 0, &login_start).await;
+
+        // Read Login Success, then acknowledge login.
+        let _login_success = cs.read_packet().await.expect("login success");
+        write_raw(&mut cs, 3, &[]).await;
+
+        // Configuration: report a Turkish locale (server decodes only the locale).
+        write_raw(&mut cs, 0, &mc_string("tr_tr")).await;
+
+        // Respond to Known Packs and acknowledge Finish Configuration.
+        loop {
+            let packet = cs.read_packet().await.expect("config packet");
+            match packet.packet_id() {
+                Some(14) => write_raw(&mut cs, 7, &varint(0)).await, // empty known packs
+                Some(3) => {
+                    write_raw(&mut cs, 3, &[]).await; // ack finish configuration
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        // Play: fail the captcha three times to force a deterministic kick.
+        for _ in 0..3 {
+            write_raw(&mut cs, 6, &mc_string("definitely-wrong")).await;
+        }
+
+        // A real client keeps streaming packets (movement, keep-alive responses)
+        // after answering. The server stops reading once it decides to kick, so
+        // this data sits unread in the socket's receive buffer — on Windows,
+        // closing a socket with unread data sends an RST, which makes the client
+        // show "Connection reset" instead of the kick message. Reproduce that here.
+        for _ in 0..64 {
+            write_raw(&mut cs, 6, &mc_string("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")).await;
+        }
+
+        // Collect system-chat messages and the final disconnect.
+        let mut system_chats: Vec<Vec<u8>> = Vec::new();
+        let disconnect;
+        loop {
+            let packet = cs
+                .read_packet()
+                .await
+                .expect("connection reset before disconnect packet");
+            match packet.packet_id() {
+                Some(108) => system_chats.push(packet.bytes().to_vec()),
+                Some(29) => {
+                    disconnect = packet.bytes().to_vec();
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        // A Turkish captcha message must have arrived intact: "ı" (0xC4 0xB1) from
+        // the copy label or "Ç" (0xC3 0x87) from the solve label.
+        let saw_turkish = system_chats
+            .iter()
+            .any(|c| contains(c, &[0xC4, 0xB1]) || contains(c, &[0xC3, 0x87]));
+        assert!(
+            saw_turkish,
+            "no intact Turkish captcha message received ({} system chats)",
+            system_chats.len()
+        );
+
+        // The (English-override) kick message must arrive intact on the disconnect.
+        assert!(
+            contains(&disconnect, b"Captcha failed"),
+            "disconnect did not contain the kick message"
+        );
+
+        server.await.unwrap();
+    }
+
+    /// The user's exact case: a 1.8.9 client (no configuration phase) sends its
+    /// Client Settings with a Turkish locale in play state, after the captcha was
+    /// already shown in the fallback language. The server must decode that packet
+    /// (proving the per-version id) and re-localize the captcha to Turkish.
+    #[tokio::test]
+    async fn captcha_relocalizes_on_legacy_1_8_locale() {
+        const PROTOCOL_1_8: i32 = 47;
+        const CLIENT_SETTINGS_1_8: u8 = 0x15;
+        const LEGACY_CHAT: u8 = 2; // clientbound legacy_chat_message in 1.8
+
+        let mut builder = ServerState::builder();
+        builder
+            .view_distance(0)
+            .welcome_message("")
+            .fallback_language("en".to_string())
+            .clear_chat_on_join(true)
+            .custom(CustomOptions {
+                captcha: CaptchaOptions {
+                    enabled: true,
+                    ..CaptchaOptions::default()
+                },
+                mirror_status: None,
+            });
+        let server_state = Arc::new(RwLock::new(builder.build().unwrap()));
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_state_clone = Arc::clone(&server_state);
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            handle_client(socket, server_state_clone).await;
+        });
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let mut cs = PacketStream::new(stream);
+
+        // Handshake (next state = login) + 1.8 Login Start (username only).
+        let mut hs = varint(PROTOCOL_1_8);
+        hs.extend(mc_string("127.0.0.1"));
+        hs.extend_from_slice(&addr.port().to_be_bytes());
+        hs.extend(varint(2));
+        write_raw(&mut cs, 0, &hs).await;
+        write_raw(&mut cs, 0, &mc_string("Tester")).await;
+
+        // Read login success (GameProfile); play packets (incl. the fallback
+        // captcha) stream in after it.
+        let _ = cs.read_packet().await.expect("login success");
+
+        // Now in play: send Client Settings with a Turkish locale. The server only
+        // decodes the leading locale string, so no trailing fields are needed.
+        write_raw(&mut cs, CLIENT_SETTINGS_1_8, &mc_string("tr_tr")).await;
+
+        // A re-localized Turkish captcha message must arrive: "ı" (0xC4 0xB1) or
+        // "Ç" (0xC3 0x87). The earlier English prompt has no such bytes.
+        let mut saw_turkish = false;
+        for _ in 0..400 {
+            let Ok(packet) = cs.read_packet().await else {
+                break;
+            };
+            if packet.packet_id() == Some(LEGACY_CHAT) {
+                let bytes = packet.bytes();
+                if contains(bytes, &[0xC4, 0xB1]) || contains(bytes, &[0xC3, 0x87]) {
+                    saw_turkish = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            saw_turkish,
+            "1.8 client locale did not re-localize the captcha to Turkish"
+        );
+
+        drop(cs);
+        server.await.unwrap();
+    }
 }

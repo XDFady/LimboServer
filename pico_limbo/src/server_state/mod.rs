@@ -1,5 +1,7 @@
 use crate::configuration::boss_bar::EnabledBossBarConfig;
 use crate::configuration::commands::CommandsConfig;
+use crate::custom::mirror_status::MirrorStatus;
+use crate::i18n::{self, LanguageMessages, Translations};
 use crate::server::game_mode::GameMode;
 use base64::engine::general_purpose;
 use base64::{Engine, alphabet, engine};
@@ -113,6 +115,11 @@ pub struct ServerState {
     allow_flight: bool,
     server_commands: ServerCommands,
     custom: CustomOptions,
+    login_timeout: Option<Duration>,
+    read_timeout: Option<Duration>,
+    fallback_language: String,
+    translations: Translations,
+    clear_chat_on_join: bool,
 }
 
 impl ServerState {
@@ -275,6 +282,58 @@ impl ServerState {
     pub const fn custom(&self) -> &CustomOptions {
         &self.custom
     }
+
+    /// Idle timeout applied while a connection is in the pre-play phases
+    /// (handshake, status, login, configuration). `None` means disabled.
+    pub const fn login_timeout(&self) -> Option<Duration> {
+        self.login_timeout
+    }
+
+    /// Idle timeout applied once a connection has reached the play phase.
+    /// `None` means disabled.
+    pub const fn read_timeout(&self) -> Option<Duration> {
+        self.read_timeout
+    }
+
+    /// Resolves the language code for a player: their client `locale` code, then
+    /// the mirrored server's detected language, then the configured fallback, then
+    /// English. Only codes that are actually loaded are returned.
+    pub fn resolve_code(&self, locale: Option<&str>) -> String {
+        if let Some(locale) = locale {
+            let code = i18n::locale_code(locale);
+            if self.translations.get_exact(&code).is_some() {
+                return code;
+            }
+        }
+        if let Some(motd) = self.mirror_motd()
+            && let Some(code) = i18n::detect_from_text(&motd)
+            && self.translations.get_exact(code).is_some()
+        {
+            return code.to_owned();
+        }
+        if self.translations.get_exact(&self.fallback_language).is_some() {
+            return self.fallback_language.clone();
+        }
+        "en".to_owned()
+    }
+
+    /// Resolves the translated messages for a player (see [`Self::resolve_code`]).
+    pub fn resolve_messages(&self, locale: Option<&str>) -> &LanguageMessages {
+        self.translations.get(&self.resolve_code(locale))
+    }
+
+    /// Whether to flush the client's chat history with blank lines on join.
+    pub const fn clear_chat_on_join(&self) -> bool {
+        self.clear_chat_on_join
+    }
+
+    fn mirror_motd(&self) -> Option<String> {
+        self.custom
+            .mirror_status
+            .as_ref()
+            .and_then(MirrorStatus::snapshot)
+            .map(|snapshot| snapshot.motd)
+    }
 }
 
 #[derive(Default)]
@@ -310,6 +369,11 @@ pub struct ServerStateBuilder {
     accept_transfers: bool,
     server_commands: ServerCommands,
     custom: CustomOptions,
+    login_timeout: u64,
+    read_timeout: u64,
+    fallback_language: String,
+    translations: Translations,
+    clear_chat_on_join: bool,
 }
 
 #[derive(Debug, Error)]
@@ -328,6 +392,8 @@ pub enum ServerStateBuilderError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     TryFromInt(#[from] TryFromIntError),
+    #[error(transparent)]
+    Translations(#[from] crate::i18n::I18nError),
 }
 
 impl ServerStateBuilder {
@@ -581,6 +647,36 @@ impl ServerStateBuilder {
         self
     }
 
+    /// Sets the pre-play idle timeout in seconds. `0` disables it.
+    pub const fn login_timeout(&mut self, seconds: u64) -> &mut Self {
+        self.login_timeout = seconds;
+        self
+    }
+
+    /// Sets the play-phase idle timeout in seconds. `0` disables it.
+    pub const fn read_timeout(&mut self, seconds: u64) -> &mut Self {
+        self.read_timeout = seconds;
+        self
+    }
+
+    /// Sets the fallback language code (e.g. `"en"`) for captcha/auth messages.
+    pub fn fallback_language(&mut self, code: String) -> &mut Self {
+        self.fallback_language = code;
+        self
+    }
+
+    /// Sets the loaded per-language translations.
+    pub fn translations(&mut self, translations: Translations) -> &mut Self {
+        self.translations = translations;
+        self
+    }
+
+    /// Enables flushing the client's chat history with blank lines on join.
+    pub const fn clear_chat_on_join(&mut self, clear: bool) -> &mut Self {
+        self.clear_chat_on_join = clear;
+        self
+    }
+
     /// Finish building, returning an error if any required fields are missing.
     pub fn build(self) -> Result<ServerState, ServerStateBuilderError> {
         let world = if self.schematic_file_path.is_empty() {
@@ -627,12 +723,27 @@ impl ServerStateBuilder {
             accept_transfers: self.accept_transfers,
             server_commands: self.server_commands,
             custom: self.custom,
+            login_timeout: duration_from_secs_opt(self.login_timeout),
+            read_timeout: duration_from_secs_opt(self.read_timeout),
+            fallback_language: self.fallback_language,
+            translations: self.translations,
+            clear_chat_on_join: self.clear_chat_on_join,
         })
     }
 
     pub fn custom(&mut self, custom: CustomOptions) -> &mut Self {
         self.custom = custom;
         self
+    }
+}
+
+/// Converts a timeout expressed in seconds into a `Duration`, treating `0` as
+/// "disabled" (`None`).
+const fn duration_from_secs_opt(seconds: u64) -> Option<Duration> {
+    if seconds == 0 {
+        None
+    } else {
+        Some(Duration::from_secs(seconds))
     }
 }
 

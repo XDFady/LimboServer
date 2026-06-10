@@ -5,6 +5,8 @@ pub mod config;
 mod env_placeholders;
 mod forwarding;
 mod game_mode_config;
+mod i18n_config;
+mod limits;
 mod require_boolean;
 mod server_list;
 pub mod tab_list;

@@ -5,16 +5,33 @@ clear
 THREADS=$(nproc)
 CPU_CAPACITY=$((THREADS * 100))
 
-# Measure real WSL CPU usage from /proc/stat over 0.5s
+# Node test is not measured here; default to 0 so COMBINED math stays clean
+NODE_CPU=${NODE_CPU:-0}
+NODE_RSS_MB=${NODE_RSS_MB:-0}
+
+# Measure real WSL CPU usage from /proc/stat + per-process PicoLimbo CPU over 0.5s
 read cpu user nice system idle iowait irq softirq steal guest guest_nice < /proc/stat
 TOTAL1=$((user + nice + system + idle + iowait + irq + softirq + steal))
 IDLE1=$((idle + iowait))
+
+PIDS=$(pgrep pico_limbo)
+declare -A T1
+for pid in $PIDS; do
+  read utime stime < <(awk '{print $14, $15}' /proc/$pid/stat 2>/dev/null)
+  [ -n "$utime" ] && T1[$pid]=$((utime + stime))
+done
 
 sleep 0.5
 
 read cpu user nice system idle iowait irq softirq steal guest guest_nice < /proc/stat
 TOTAL2=$((user + nice + system + idle + iowait + irq + softirq + steal))
 IDLE2=$((idle + iowait))
+
+declare -A T2
+for pid in $PIDS; do
+  read utime stime < <(awk '{print $14, $15}' /proc/$pid/stat 2>/dev/null)
+  [ -n "$utime" ] && T2[$pid]=$((utime + stime))
+done
 
 TOTAL_DIFF=$((TOTAL2 - TOTAL1))
 IDLE_DIFF=$((IDLE2 - IDLE1))
@@ -32,11 +49,29 @@ echo "WSL total CPU used       : ${WSL_CPU_USED}% of available WSL CPU"
 echo
 
 echo "==================== PICOLIMBO TOTAL ================="
-PICO_COUNT=$(pgrep -c pico_limbo 2>/dev/null || echo 0)
+PICO_COUNT=0
+PICO_CPU="0.00"
+PICO_RSS_MB="0.00"
+PICO_TABLE=""
 
-PICO_CPU=$(ps -C pico_limbo -o %cpu= 2>/dev/null | awk '{sum+=$1} END {printf "%.2f", sum+0}')
-PICO_RSS_MB=$(ps -C pico_limbo -o rss= 2>/dev/null | awk '{sum+=$1} END {printf "%.2f", sum/1024}')
-PICO_AVG_RSS_MB=$(ps -C pico_limbo -o rss= 2>/dev/null | awk -v count="$PICO_COUNT" '{sum+=$1} END {if (count > 0) printf "%.2f", (sum/1024)/count; else printf "0.00"}')
+# Per-process CPU% = (proc jiffy delta / system jiffy delta) * 100 * threads
+for pid in $PIDS; do
+  [ -n "${T2[$pid]}" ] || continue
+  PICO_COUNT=$((PICO_COUNT + 1))
+
+  DIFF=$(( ${T2[$pid]:-0} - ${T1[$pid]:-0} ))
+  CPU=$(awk -v d="$DIFF" -v total="$TOTAL_DIFF" -v n="$THREADS" 'BEGIN { if (total > 0) printf "%.2f", (d/total)*100*n; else printf "0.00" }')
+
+  read rss etime args < <(ps -p "$pid" -o rss=,etime=,args= 2>/dev/null)
+  rss=${rss:-0}
+
+  PICO_CPU=$(awk -v a="$PICO_CPU" -v b="$CPU" 'BEGIN {printf "%.2f", a+b}')
+  PICO_RSS_MB=$(awk -v a="$PICO_RSS_MB" -v b="$rss" 'BEGIN {printf "%.2f", a + b/1024}')
+  PICO_TABLE+=$(printf "%s\t%s\t%s\t%s\t%s\n" "$CPU" "$pid" "$rss" "$etime" "$args")
+  PICO_TABLE+=$'\n'
+done
+
+PICO_AVG_RSS_MB=$(awk -v total="$PICO_RSS_MB" -v count="$PICO_COUNT" 'BEGIN {if (count > 0) printf "%.2f", total/count; else printf "0.00"}')
 
 echo "PicoLimbo processes      : $PICO_COUNT"
 echo "PicoLimbo total CPU      : ${PICO_CPU}% / ${CPU_CAPACITY}% capacity"
@@ -59,7 +94,8 @@ echo "PicoLimbo     : ${COMBINED_RAM} MB"
 echo
 
 echo "==================== TOP PICOLIMBO BY CPU ============"
-ps -C pico_limbo -o pid,%cpu,rss,vsz,etime,args --sort=-%cpu 2>/dev/null | head -15
+printf "%-7s %-7s %-9s %-12s %s\n" "%CPU" "PID" "RSS" "ELAPSED" "COMMAND"
+printf "%b" "$PICO_TABLE" | grep -v '^$' | sort -t$'\t' -k1 -rn | head -15 | awk -F'\t' '{printf "%-7s %-7s %-9s %-12s %s\n", $1, $2, $3, $4, $5}'
 echo
 
 echo "==================== LISTENING LIMBO PORTS ==========="

@@ -96,6 +96,12 @@ impl Challenge {
     /// on the line below (`<newline>`). Keeping the two on separate lines lets
     /// right-to-left languages such as Arabic render the label correctly without
     /// the bidirectional algorithm reordering it around the Latin-digit challenge.
+    ///
+    /// Arithmetic operators carry no surrounding spaces (`18-17`, not `18 - 17`):
+    /// an operator placed directly between two digits is absorbed into a single
+    /// left-to-right numeric run (Unicode bidi rule W4), so the expression keeps
+    /// its order under RTL. With spaces, an RTL locale reorders the two operands
+    /// and a subtraction would read reversed (e.g. `18 - 17` shown as `17 - 18`).
     fn prompt(&self, messages: &LanguageMessages) -> Result<Component, MiniMessageError> {
         let body = match self {
             Self::Copy(number) => format!(
@@ -103,15 +109,15 @@ impl Challenge {
                 messages.captcha_copy_label
             ),
             Self::Add(a, b) => format!(
-                "<yellow>{}</yellow><newline><green><bold>{a} + {b}</bold></green>",
+                "<yellow>{}</yellow><newline><green><bold>{a}+{b}</bold></green>",
                 messages.captcha_solve_label
             ),
             Self::Subtract(a, b) => format!(
-                "<yellow>{}</yellow><newline><green><bold>{a} - {b}</bold></green>",
+                "<yellow>{}</yellow><newline><green><bold>{a}-{b}</bold></green>",
                 messages.captcha_solve_label
             ),
             Self::Multiply(a, b) => format!(
-                "<yellow>{}</yellow><newline><green><bold>{a} × {b}</bold></green>",
+                "<yellow>{}</yellow><newline><green><bold>{a}×{b}</bold></green>",
                 messages.captcha_solve_label
             ),
             Self::Bigger(a, b) => format!(

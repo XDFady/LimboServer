@@ -136,6 +136,9 @@ fn build_state(
         .time_world(cfg.world.time.into())
         .lock_time(cfg.world.experimental.lock_time)
         .description_text(&cfg.server_list.message_of_the_day)
+        // The join welcome is sourced per-language from the translation files,
+        // not server.toml; clear this server-wide fallback so config can't leak in.
+        .welcome_message("")
         .action_bar(&cfg.action_bar)?
         .max_players(cfg.server_list.max_players)
         .show_online_player_count(cfg.server_list.show_online_player_count)

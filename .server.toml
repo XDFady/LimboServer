@@ -1,4 +1,4 @@
-action_bar = "Welcome to PicoLimbo!"
+action_bar = ""
 default_game_mode = "spectator"
 hardcore = false
 fetch_player_skins = false

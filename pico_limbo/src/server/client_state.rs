@@ -1,7 +1,7 @@
 use crate::server::game_profile::GameProfile;
 use minecraft_packets::login::Property;
 use minecraft_protocol::prelude::{ProtocolVersion, State, Uuid};
-use tracing::info;
+use tracing::debug;
 use std::time::{Duration, Instant};
 
 #[derive(PartialEq, Eq)]
@@ -108,7 +108,9 @@ impl ClientState {
         if let Some(ref existing_game_profile) = self.game_profile
             && !existing_game_profile.is_anonymous()
         {
-            info!(
+            // Per-connection log: only at verbose (`-v`) level, to avoid console
+            // spam when many connections arrive per second.
+            debug!(
                 "UUID of player {} is {}",
                 existing_game_profile.username(),
                 existing_game_profile.uuid()

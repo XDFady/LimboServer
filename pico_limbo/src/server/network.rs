@@ -164,7 +164,9 @@ async fn process_packet(
             username,
             protocol_version.humanize()
         );
-        info!("{} joined the game", username,);
+        // Per-connection lifecycle log: only at verbose (`-v`) level, since a
+        // connection flood would otherwise spam the console.
+        debug!("{} joined the game", username,);
     }
 
     let mut stream = batch.into_stream();
@@ -303,7 +305,8 @@ async fn handle_client(socket: TcpStream, server_state: Arc<RwLock<ServerState>>
     if was_in_play_state {
         server_state.write().await.decrement();
         let username = client_data.client().await.get_username();
-        info!("{} left the game", username);
+        // Per-connection lifecycle log: only at verbose (`-v`) level (see join).
+        debug!("{} left the game", username);
     }
 }
 

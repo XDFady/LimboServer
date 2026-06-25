@@ -31,6 +31,10 @@ pub struct LanguageMessages {
     /// full-screen title. Defined per language in this file; if left empty, the
     /// localized built-in default for the language is used.
     pub welcome: String,
+    /// Subtitle shown under the welcome title (`MiniMessage` allowed): a short
+    /// instruction telling the player what to do. Only displayed while the captcha
+    /// module is active. If left empty, the localized built-in default is used.
+    pub welcome_subtitle: String,
     /// Label before a "type this number" challenge.
     pub captcha_copy_label: String,
     /// Label before an arithmetic challenge (`8 - 3`, `2 × 4`, ...).
@@ -60,6 +64,7 @@ impl LanguageMessages {
     /// Fills any empty field from `defaults`, so partially-edited files keep working.
     fn fill_empty_from(&mut self, defaults: &Self) {
         fill(&mut self.welcome, &defaults.welcome);
+        fill(&mut self.welcome_subtitle, &defaults.welcome_subtitle);
         fill(&mut self.captcha_copy_label, &defaults.captcha_copy_label);
         fill(&mut self.captcha_solve_label, &defaults.captcha_solve_label);
         fill(
@@ -173,21 +178,38 @@ fn builtin_strings(code: &str) -> Option<[&'static str; 8]> {
     Some(strings)
 }
 
-/// Built-in join welcome (shown as a full-screen title), per language. The
-/// welcome lives entirely in the translation files: this is only the default
-/// written out on first run. Unknown (custom) codes fall back to the English
-/// welcome until translated.
+/// Built-in join welcome title, per language. This server is a verification gate,
+/// so the title names that stage. It lives entirely in the translation files;
+/// this is only the default written out on first run. Unknown (custom) codes fall
+/// back to the English title until translated.
 fn builtin_welcome(code: &str) -> &'static str {
     match code {
-        "tr" => "PicoLimbo'ya hoş geldin!",
-        "de" => "Willkommen bei PicoLimbo!",
-        "ar" => "مرحباً بك في PicoLimbo!",
-        "nl" => "Welkom bij PicoLimbo!",
-        "fr" => "Bienvenue sur PicoLimbo !",
-        "es" => "¡Bienvenido a PicoLimbo!",
-        "it" => "Benvenuto su PicoLimbo!",
+        "tr" => "<aqua><bold>Doğrulama</bold></aqua>",
+        "de" => "<aqua><bold>Verifizierung</bold></aqua>",
+        "ar" => "<aqua><bold>نظام التحقق</bold></aqua>",
+        "nl" => "<aqua><bold>Verificatie</bold></aqua>",
+        "fr" => "<aqua><bold>Vérification</bold></aqua>",
+        "es" => "<aqua><bold>Verificación</bold></aqua>",
+        "it" => "<aqua><bold>Verifica</bold></aqua>",
         // English and any custom language.
-        _ => "Solve the current captcha to join!",
+        _ => "<aqua><bold>Verification</bold></aqua>",
+    }
+}
+
+/// Built-in welcome subtitle, per language: a one-line instruction shown under the
+/// title while a captcha must be solved. Unknown (custom) codes fall back to the
+/// English subtitle until translated.
+fn builtin_welcome_subtitle(code: &str) -> &'static str {
+    match code {
+        "tr" => "<gray>Katılmak için cevabı sohbete yaz</gray>",
+        "de" => "<gray>Löse das Captcha im Chat, um beizutreten</gray>",
+        "ar" => "<gray>اكتب الإجابة في الدردشة للدخول</gray>",
+        "nl" => "<gray>Los de captcha op in de chat om mee te doen</gray>",
+        "fr" => "<gray>Résous le captcha dans le chat pour rejoindre</gray>",
+        "es" => "<gray>Resuelve el captcha en el chat para entrar</gray>",
+        "it" => "<gray>Risolvi il captcha in chat per entrare</gray>",
+        // English and any custom language.
+        _ => "<gray>Solve the captcha in chat to join</gray>",
     }
 }
 
@@ -200,6 +222,7 @@ fn builtin(code: &str) -> LanguageMessages {
         .expect("English built-in strings are always present");
     LanguageMessages {
         welcome: builtin_welcome(code).to_owned(),
+        welcome_subtitle: builtin_welcome_subtitle(code).to_owned(),
         captcha_copy_label: s[0].to_owned(),
         captcha_solve_label: s[1].to_owned(),
         captcha_pick_bigger_label: s[2].to_owned(),
@@ -302,7 +325,7 @@ mod tests {
 
         // First run: generates every built-in file with its localized defaults.
         let first = Translations::load_or_create(&dir).unwrap();
-        assert_eq!(first.get("tr").welcome, "PicoLimbo'ya hoş geldin!");
+        assert_eq!(first.get("tr").welcome, "<aqua><bold>Doğrulama</bold></aqua>");
         assert_eq!(first.get("tr").captcha_copy_label, "Bu sayıyı yaz:");
         assert!(dir.join("es.toml").exists());
         assert!(dir.join("it.toml").exists());
@@ -342,10 +365,37 @@ mod tests {
     #[test]
     fn welcome_is_localized_per_language() {
         let translations = Translations::builtin();
-        assert_eq!(translations.get("en").welcome, "Solve the current captcha to join!");
-        assert_eq!(translations.get("de").welcome, "Löse das aktuelle Captcha, um beizutreten!");
-        // A custom (file-only) language falls back to the English welcome.
-        assert_eq!(translations.get("xx").welcome, "Solve the current captcha to join!");
+        assert_eq!(
+            translations.get("en").welcome,
+            "<aqua><bold>Verification</bold></aqua>"
+        );
+        assert_eq!(
+            translations.get("de").welcome,
+            "<aqua><bold>Verifizierung</bold></aqua>"
+        );
+        // A custom (file-only) language falls back to the English title.
+        assert_eq!(
+            translations.get("xx").welcome,
+            "<aqua><bold>Verification</bold></aqua>"
+        );
+    }
+
+    #[test]
+    fn welcome_subtitle_is_localized_per_language() {
+        let translations = Translations::builtin();
+        assert_eq!(
+            translations.get("en").welcome_subtitle,
+            "<gray>Solve the captcha in chat to join</gray>"
+        );
+        assert_eq!(
+            translations.get("de").welcome_subtitle,
+            "<gray>Löse das Captcha im Chat, um beizutreten</gray>"
+        );
+        // A custom (file-only) language falls back to the English subtitle.
+        assert_eq!(
+            translations.get("xx").welcome_subtitle,
+            "<gray>Solve the captcha in chat to join</gray>"
+        );
     }
 
     #[test]

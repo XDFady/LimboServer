@@ -310,47 +310,105 @@ fn clear_chat(batch: &mut Batch<PacketRegistry>, protocol_version: ProtocolVersi
 }
 
 /// Sends the join welcome as a full-screen title (the big centered text), in the
-/// player's language. The per-language `welcome` from the translation files takes
-/// precedence; if it is empty, the global `welcome_message` from server.toml is
-/// used. Titles exist from 1.8; older clients receive it as a chat message.
+/// player's language, from the per-language `welcome` key.
+///
+/// While the captcha module is active, a `welcome_subtitle` (a short instruction)
+/// is shown under the title, and both are kept on screen for the whole solve
+/// window so the player always sees what stage they are in and what to do. Without
+/// a captcha, only the title is shown with a brief fade. Titles exist from 1.8;
+/// older clients receive the text as chat messages.
 fn send_welcome_title(
     batch: &mut Batch<PacketRegistry>,
     client_state: &ClientState,
     server_state: &ServerState,
     protocol_version: ProtocolVersion,
 ) {
-    let localized_welcome = &server_state.resolve_messages(client_state.locale()).welcome;
-    let component = if localized_welcome.trim().is_empty() {
+    let messages = server_state.resolve_messages(client_state.locale());
+    let captcha = &server_state.custom().captcha;
+
+    let mut title = if messages.welcome.trim().is_empty() {
         server_state.welcome_message().cloned()
     } else {
-        parse_mini_message(localized_welcome).ok()
+        parse_mini_message(&messages.welcome).ok()
     };
-    let Some(component) = component else {
+    // The subtitle is a captcha instruction, so it only applies while the captcha
+    // module is enabled.
+    let subtitle = if captcha.enabled && !messages.welcome_subtitle.trim().is_empty() {
+        parse_mini_message(&messages.welcome_subtitle).ok()
+    } else {
+        None
+    };
+
+    if title.is_none() && subtitle.is_none() {
         return;
+    }
+    // A subtitle only renders alongside a title, so keep a (blank) title for it.
+    if title.is_none() {
+        title = Some(Component::new(""));
+    }
+
+    // Keep the title/subtitle up for the captcha solve window; otherwise a brief
+    // fade as before.
+    let (fade_in, stay, fade_out) = if captcha.enabled {
+        (
+            WELCOME_FADE_IN,
+            captcha_stay_ticks(captcha.timeout_seconds),
+            WELCOME_FADE_OUT,
+        )
+    } else {
+        (WELCOME_FADE_IN, WELCOME_STAY, WELCOME_FADE_OUT)
     };
 
     if protocol_version.is_after_inclusive(ProtocolVersion::V1_17) {
-        let animation =
-            SetTitlesAnimationPacket::new(WELCOME_FADE_IN, WELCOME_STAY, WELCOME_FADE_OUT);
+        let animation = SetTitlesAnimationPacket::new(fade_in, stay, fade_out);
         batch.queue(|| PacketRegistry::SetTitlesAnimation(animation));
-        let title = SetTitleTextPacket::new(&component);
-        batch.queue(|| PacketRegistry::SetTitleText(title));
+        if let Some(title) = title {
+            let packet = SetTitleTextPacket::new(&title);
+            batch.queue(|| PacketRegistry::SetTitleText(packet));
+        }
+        if let Some(subtitle) = subtitle {
+            let packet = SetSubtitleTextPacket::new(&subtitle);
+            batch.queue(|| PacketRegistry::SetSubtitleText(packet));
+        }
     } else if protocol_version.is_after_inclusive(ProtocolVersion::V1_8) {
-        let animation =
-            LegacySetTitlePacket::set_animation(WELCOME_FADE_IN, WELCOME_STAY, WELCOME_FADE_OUT);
+        let animation = LegacySetTitlePacket::set_animation(fade_in, stay, fade_out);
         batch.queue(|| PacketRegistry::LegacySetTitle(animation));
-        let title = LegacySetTitlePacket::set_title(&component);
-        batch.queue(|| PacketRegistry::LegacySetTitle(title));
+        if let Some(title) = title {
+            let packet = LegacySetTitlePacket::set_title(&title);
+            batch.queue(|| PacketRegistry::LegacySetTitle(packet));
+        }
+        if let Some(subtitle) = subtitle {
+            let packet = LegacySetTitlePacket::set_subtitle(&subtitle);
+            batch.queue(|| PacketRegistry::LegacySetTitle(packet));
+        }
     } else {
-        send_message(batch, &component, protocol_version);
+        if let Some(title) = title {
+            send_message(batch, &title, protocol_version);
+        }
+        if let Some(subtitle) = subtitle {
+            send_message(batch, &subtitle, protocol_version);
+        }
     }
 }
 
 /// Welcome-title timing, in ticks: quick fade-in, a few seconds on screen, gentle
-/// fade-out.
+/// fade-out. Used when no captcha is active.
 const WELCOME_FADE_IN: i32 = 10;
 const WELCOME_STAY: i32 = 70;
 const WELCOME_FADE_OUT: i32 = 20;
+
+/// On-screen time (ticks) for the welcome title/subtitle while a captcha is
+/// active: the full solve window, so the instruction stays visible until the
+/// player solves it or is kicked. A captcha timeout of `0` (no timeout) maps to a
+/// long fixed duration.
+fn captcha_stay_ticks(timeout_seconds: u64) -> i32 {
+    const TICKS_PER_SECOND: u64 = 20;
+    const NO_TIMEOUT_STAY: i32 = 10 * 60 * 20; // 10 minutes
+    if timeout_seconds == 0 {
+        return NO_TIMEOUT_STAY;
+    }
+    i32::try_from(timeout_seconds.saturating_mul(TICKS_PER_SECOND)).unwrap_or(i32::MAX)
+}
 
 fn send_tab_list_packets(batch: &mut Batch<PacketRegistry>, server_state: &ServerState) {
     if let Some(TabList { header, footer }) = server_state.tab_list() {

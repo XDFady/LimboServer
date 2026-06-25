@@ -95,9 +95,9 @@ impl Default for Config {
         Self {
             bind: "0.0.0.0:25565".into(),
             server_list: ServerListConfig::default(),
-            welcome_message: "Welcome to PicoLimbo!".into(),
+            welcome_message: "Solve the current captcha to join!".into(),
             clear_chat_on_join: true,
-            action_bar: "Welcome to PicoLimbo!".into(),
+            action_bar: "Solve the current captcha to join!".into(),
             forwarding: ForwardingConfig::default(),
             default_game_mode: GameModeConfig::default(),
             world: WorldConfig::default(),

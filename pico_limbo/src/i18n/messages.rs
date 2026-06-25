@@ -187,7 +187,7 @@ fn builtin_welcome(code: &str) -> &'static str {
         "es" => "¡Bienvenido a PicoLimbo!",
         "it" => "Benvenuto su PicoLimbo!",
         // English and any custom language.
-        _ => "Welcome to PicoLimbo!",
+        _ => "Solve the current captcha to join!",
     }
 }
 
@@ -342,10 +342,10 @@ mod tests {
     #[test]
     fn welcome_is_localized_per_language() {
         let translations = Translations::builtin();
-        assert_eq!(translations.get("en").welcome, "Welcome to PicoLimbo!");
-        assert_eq!(translations.get("de").welcome, "Willkommen bei PicoLimbo!");
+        assert_eq!(translations.get("en").welcome, "Solve the current captcha to join!");
+        assert_eq!(translations.get("de").welcome, "Löse das aktuelle Captcha, um beizutreten!");
         // A custom (file-only) language falls back to the English welcome.
-        assert_eq!(translations.get("xx").welcome, "Welcome to PicoLimbo!");
+        assert_eq!(translations.get("xx").welcome, "Solve the current captcha to join!");
     }
 
     #[test]

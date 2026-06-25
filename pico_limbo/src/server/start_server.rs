@@ -22,13 +22,16 @@ pub async fn start_server(
     logging_level: u8,
     token: Option<&CancellationToken>,
     custom_options: CustomOptions,
+    bind_override: Option<String>,
 ) -> ExitCode {
     enable_logging(logging_level);
     let Some(cfg) = load_configuration(&config_path) else {
         return ExitCode::FAILURE;
     };
 
-    let bind = cfg.bind.clone();
+    // The bind address is taken from `--bind` when provided, otherwise from the
+    // configuration file.
+    let bind = bind_override.unwrap_or_else(|| cfg.bind.clone());
 
     match build_state(cfg, custom_options) {
         Ok(server_state) => {
@@ -75,10 +78,9 @@ fn build_state(
     let fallback_language = i18n::parse_fallback(&cfg.i18n.fallback_language);
 
     // Load the editable per-language translation files (created on first run).
-    // The global welcome_message seeds each file's `welcome` so it is visible and
-    // ready to translate.
-    let translations =
-        Translations::load_or_create(Path::new(&cfg.i18n.directory), &cfg.welcome_message)?;
+    // The join welcome lives entirely in these files (`welcome` key), localized
+    // per language; it is no longer sourced from server.toml.
+    let translations = Translations::load_or_create(Path::new(&cfg.i18n.directory))?;
 
     let forwarding: TaggedForwarding = cfg.forwarding.into();
 
@@ -134,7 +136,6 @@ fn build_state(
         .time_world(cfg.world.time.into())
         .lock_time(cfg.world.experimental.lock_time)
         .description_text(&cfg.server_list.message_of_the_day)
-        .welcome_message(&cfg.welcome_message)
         .action_bar(&cfg.action_bar)?
         .max_players(cfg.server_list.max_players)
         .show_online_player_count(cfg.server_list.show_online_player_count)

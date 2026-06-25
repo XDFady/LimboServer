@@ -28,6 +28,17 @@ pub struct Cli {
     )]
     pub config_path: PathBuf,
 
+    /// Address and port to bind the server to.
+    /// When set, this overrides the `bind` value from the configuration file,
+    /// allowing several instances to share one config on different ports.
+    #[arg(
+        short = 'b',
+        long = "bind",
+        value_name = "IP:PORT",
+        help = "Address and port to bind to, e.g. 0.0.0.0:25565 (overrides the config file)"
+    )]
+    pub bind: Option<String>,
+
     /// Enable the custom captcha module
     #[arg(
         long = "captcha",

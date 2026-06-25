@@ -95,6 +95,7 @@ pub unsafe extern "C" fn start_app(
                 cli.verbose,
                 Some(token),
                 custom_options,
+                cli.bind,
             ));
         }
         Err(e) => {

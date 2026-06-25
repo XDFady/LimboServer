@@ -24,5 +24,6 @@ async fn main() -> ExitCode {
         cli.verbose,
         None,
         custom_options,
+        cli.bind,
     ).await
 }

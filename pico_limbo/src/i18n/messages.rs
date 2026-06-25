@@ -28,7 +28,8 @@ pub enum I18nError {
 #[serde(default)]
 pub struct LanguageMessages {
     /// Join welcome message (`MiniMessage` formatting allowed), shown as a
-    /// full-screen title. Empty = use the global `welcome_message` from server.toml.
+    /// full-screen title. Defined per language in this file; if left empty, the
+    /// localized built-in default for the language is used.
     pub welcome: String,
     /// Label before a "type this number" challenge.
     pub captcha_copy_label: String,
@@ -172,15 +173,33 @@ fn builtin_strings(code: &str) -> Option<[&'static str; 8]> {
     Some(strings)
 }
 
+/// Built-in join welcome (shown as a full-screen title), per language. The
+/// welcome lives entirely in the translation files: this is only the default
+/// written out on first run. Unknown (custom) codes fall back to the English
+/// welcome until translated.
+fn builtin_welcome(code: &str) -> &'static str {
+    match code {
+        "tr" => "PicoLimbo'ya hoş geldin!",
+        "de" => "Willkommen bei PicoLimbo!",
+        "ar" => "مرحباً بك في PicoLimbo!",
+        "nl" => "Welkom bij PicoLimbo!",
+        "fr" => "Bienvenue sur PicoLimbo !",
+        "es" => "¡Bienvenido a PicoLimbo!",
+        "it" => "Benvenuto su PicoLimbo!",
+        // English and any custom language.
+        _ => "Welcome to PicoLimbo!",
+    }
+}
+
 /// The built-in defaults for a language. Unknown (custom) codes fall back to the
 /// English strings, so a freshly-created custom file still has working captcha
-/// text until it is translated. `welcome` is seeded with `default_welcome`.
-fn builtin(code: &str, default_welcome: &str) -> LanguageMessages {
+/// text and welcome until it is translated.
+fn builtin(code: &str) -> LanguageMessages {
     let s = builtin_strings(code)
         .or_else(|| builtin_strings("en"))
         .expect("English built-in strings are always present");
     LanguageMessages {
-        welcome: default_welcome.to_owned(),
+        welcome: builtin_welcome(code).to_owned(),
         captcha_copy_label: s[0].to_owned(),
         captcha_solve_label: s[1].to_owned(),
         captcha_pick_bigger_label: s[2].to_owned(),
@@ -200,16 +219,16 @@ pub struct Translations {
 
 impl Default for Translations {
     fn default() -> Self {
-        Self::builtin("")
+        Self::builtin()
     }
 }
 
 impl Translations {
     /// In-memory translations using only the compiled-in defaults (no files).
-    pub fn builtin(default_welcome: &str) -> Self {
+    pub fn builtin() -> Self {
         let messages = BUILTIN_LANGUAGES
             .iter()
-            .map(|&code| (code.to_owned(), builtin(code, default_welcome)))
+            .map(|&code| (code.to_owned(), builtin(code)))
             .collect();
         Self { messages }
     }
@@ -217,14 +236,14 @@ impl Translations {
     /// Writes any missing built-in language file, then loads **every** `*.toml`
     /// in `directory` (built-in and custom), keyed by the file's base name.
     /// Adding a language is just dropping a new file and restarting.
-    pub fn load_or_create(directory: &Path, default_welcome: &str) -> Result<Self, I18nError> {
+    pub fn load_or_create(directory: &Path) -> Result<Self, I18nError> {
         fs::create_dir_all(directory)?;
 
         // Create any missing built-in file with the compiled-in defaults.
         for &code in BUILTIN_LANGUAGES {
             let path = directory.join(format!("{code}.toml"));
             if !path.exists() {
-                fs::write(&path, toml::to_string_pretty(&builtin(code, default_welcome))?)?;
+                fs::write(&path, toml::to_string_pretty(&builtin(code))?)?;
             }
         }
 
@@ -244,14 +263,14 @@ impl Translations {
             };
 
             let mut loaded = toml::from_str::<LanguageMessages>(&fs::read_to_string(&path)?)?;
-            loaded.fill_empty_from(&builtin(&code, default_welcome));
+            loaded.fill_empty_from(&builtin(&code));
             messages.insert(code, loaded);
         }
 
         // English must always exist as the ultimate fallback.
         messages
             .entry("en".to_owned())
-            .or_insert_with(|| builtin("en", default_welcome));
+            .or_insert_with(|| builtin("en"));
 
         Ok(Self { messages })
     }
@@ -281,9 +300,9 @@ mod tests {
         let dir = env::temp_dir().join("pico_i18n_loader_test");
         let _ = fs::remove_dir_all(&dir);
 
-        // First run: generates every built-in file with defaults + seeded welcome.
-        let first = Translations::load_or_create(&dir, "Global Welcome").unwrap();
-        assert_eq!(first.get("tr").welcome, "Global Welcome");
+        // First run: generates every built-in file with its localized defaults.
+        let first = Translations::load_or_create(&dir).unwrap();
+        assert_eq!(first.get("tr").welcome, "PicoLimbo'ya hoş geldin!");
         assert_eq!(first.get("tr").captcha_copy_label, "Bu sayıyı yaz:");
         assert!(dir.join("es.toml").exists());
         assert!(dir.join("it.toml").exists());
@@ -299,7 +318,7 @@ mod tests {
 
         // Reload (= server restart): edits applied, missing keys filled, custom
         // language loaded (its missing keys fall back to English).
-        let second = Translations::load_or_create(&dir, "Global Welcome").unwrap();
+        let second = Translations::load_or_create(&dir).unwrap();
         assert_eq!(second.get("tr").welcome, "Hoş geldin!");
         assert_eq!(
             second.get("tr").captcha_success,
@@ -316,13 +335,22 @@ mod tests {
 
     #[test]
     fn wrong_answer_substitutes_attempt_count() {
-        let messages = Translations::builtin("").get("en").clone();
+        let messages = Translations::builtin().get("en").clone();
         assert_eq!(messages.wrong_answer(2), "Oops, wrong! Tries left: 2");
     }
 
     #[test]
+    fn welcome_is_localized_per_language() {
+        let translations = Translations::builtin();
+        assert_eq!(translations.get("en").welcome, "Welcome to PicoLimbo!");
+        assert_eq!(translations.get("de").welcome, "Willkommen bei PicoLimbo!");
+        // A custom (file-only) language falls back to the English welcome.
+        assert_eq!(translations.get("xx").welcome, "Welcome to PicoLimbo!");
+    }
+
+    #[test]
     fn spanish_and_italian_are_built_in() {
-        let translations = Translations::builtin("");
+        let translations = Translations::builtin();
         assert!(translations.get_exact("es").is_some());
         assert!(translations.get_exact("it").is_some());
         assert_eq!(translations.get("es").captcha_copy_label, "Escribe este número:");

@@ -638,7 +638,7 @@ mod tests {
             // The localized kick message itself must encode on every version.
             let reason = format!(
                 "[PLETX] {}",
-                Translations::builtin("").get("tr").captcha_success
+                Translations::builtin().get("tr").captcha_success
             );
             let kick = PacketRegistry::PlayDisconnect(DisconnectPacket::text(reason));
             assert!(

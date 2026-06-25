@@ -91,26 +91,31 @@ impl Challenge {
     }
 
     /// Builds the minimal, localized prompt component.
+    ///
+    /// The instruction label is placed on its own line, with the challenge itself
+    /// on the line below (`<newline>`). Keeping the two on separate lines lets
+    /// right-to-left languages such as Arabic render the label correctly without
+    /// the bidirectional algorithm reordering it around the Latin-digit challenge.
     fn prompt(&self, messages: &LanguageMessages) -> Result<Component, MiniMessageError> {
         let body = match self {
             Self::Copy(number) => format!(
-                "<yellow>{}</yellow> <green><bold>{number}</bold></green>",
+                "<yellow>{}</yellow><newline><green><bold>{number}</bold></green>",
                 messages.captcha_copy_label
             ),
             Self::Add(a, b) => format!(
-                "<yellow>{}</yellow> <green><bold>{a} + {b}</bold></green>",
+                "<yellow>{}</yellow><newline><green><bold>{a} + {b}</bold></green>",
                 messages.captcha_solve_label
             ),
             Self::Subtract(a, b) => format!(
-                "<yellow>{}</yellow> <green><bold>{a} - {b}</bold></green>",
+                "<yellow>{}</yellow><newline><green><bold>{a} - {b}</bold></green>",
                 messages.captcha_solve_label
             ),
             Self::Multiply(a, b) => format!(
-                "<yellow>{}</yellow> <green><bold>{a} × {b}</bold></green>",
+                "<yellow>{}</yellow><newline><green><bold>{a} × {b}</bold></green>",
                 messages.captcha_solve_label
             ),
             Self::Bigger(a, b) => format!(
-                "<yellow>{}</yellow> <green><bold>{a}   {b}</bold></green>",
+                "<yellow>{}</yellow><newline><green><bold>{a}   {b}</bold></green>",
                 messages.captcha_pick_bigger_label
             ),
         };
@@ -248,7 +253,7 @@ mod tests {
     /// sure each localized prompt parses as valid `MiniMessage`.
     #[test]
     fn challenges_and_messages_render_for_every_language() {
-        let translations = Translations::builtin("");
+        let translations = Translations::builtin();
         let challenges = [
             Challenge::Copy(1234),
             Challenge::Add(2, 3),
@@ -272,7 +277,7 @@ mod tests {
 
     #[test]
     fn success_message_is_always_prefixed() {
-        let translations = Translations::builtin("");
+        let translations = Translations::builtin();
         let options = CaptchaOptions::default();
         for &code in BUILTIN_LANGUAGES {
             assert!(success_message(translations.get(code), &options).starts_with("[PLETX] "));
@@ -354,7 +359,7 @@ mod tests {
                 encoded.err()
             );
 
-            let translations = Translations::builtin("");
+            let translations = Translations::builtin();
             let prompt = Challenge::Copy(1234)
                 .prompt(translations.get("tr"))
                 .unwrap();

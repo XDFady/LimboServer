@@ -12,6 +12,13 @@ impl StatusResponsePacket {
         StatusResponsePacket { json_response }
     }
 
+    /// Builds the packet from an already-serialized status JSON string, sent on
+    /// the wire byte-for-byte. Used to relay an upstream server's status response
+    /// verbatim so a proxied status ping is indistinguishable from the origin.
+    pub fn from_json(json_response: String) -> Self {
+        StatusResponsePacket { json_response }
+    }
+
     pub fn status_response(&self) -> serde_json::Result<StatusResponse> {
         serde_json::from_str(self.json_response.as_str())
     }

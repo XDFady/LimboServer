@@ -16,10 +16,14 @@ pub struct MirrorStatus {
 
 #[derive(Clone)]
 pub struct MirrorSnapshot {
+    /// The upstream server's status response JSON, captured verbatim so it can be
+    /// relayed byte-for-byte (the status ping is then indistinguishable from the
+    /// origin: version, enforcesSecureChat, description format, field order, ...).
+    pub raw_json: String,
+    /// MOTD as plain text, kept for language detection from the mirrored server.
     pub motd: String,
     pub online_players: u32,
     pub max_players: u32,
-    pub favicon: Option<String>,
 }
 
 impl MirrorStatus {
@@ -146,17 +150,11 @@ async fn ping_java_server_inner(
         .unwrap_or(0)
         .min(u64::from(u32::MAX)) as u32;
 
-    let favicon = value
-        .get("favicon")
-        .and_then(Value::as_str)
-        .filter(|icon| icon.starts_with("data:image/png;base64,"))
-        .map(ToString::to_string);
-
     Ok(MirrorSnapshot {
+        raw_json: json_text,
         motd,
         online_players,
         max_players,
-        favicon,
     })
 }
 

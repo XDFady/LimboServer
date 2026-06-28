@@ -7,7 +7,6 @@ use minecraft_packets::status::data::status_response::StatusResponse;
 use minecraft_packets::status::status_request_packet::StatusRequestPacket;
 use minecraft_packets::status::status_response_packet::StatusResponsePacket;
 use minecraft_protocol::prelude::ProtocolVersion;
-use pico_text_component::prelude::parse_mini_message;
 
 impl PacketHandler for StatusRequestPacket {
     fn handle(
@@ -16,6 +15,26 @@ impl PacketHandler for StatusRequestPacket {
         server_state: &ServerState,
     ) -> Result<Batch<PacketRegistry>, PacketHandlerError> {
         let mut batch = Batch::new();
+
+        // When mirroring is enabled and the upstream server has been reached, relay
+        // its status response verbatim. Rebuilding it from our own fields can never
+        // byte-match the origin (version/protocol, enforcesSecureChat naming,
+        // description format and field order all differ), so we forward the exact
+        // JSON instead, making the proxied status ping indistinguishable.
+        let mirror_snapshot = server_state
+            .custom()
+            .mirror_status
+            .as_ref()
+            .and_then(|mirror| mirror.snapshot());
+
+        if let Some(snapshot) = mirror_snapshot {
+            let packet = StatusResponsePacket::from_json(snapshot.raw_json);
+            batch.queue(|| PacketRegistry::StatusResponse(packet));
+            return Ok(batch);
+        }
+
+        // Fallback (no mirror configured, or the upstream server is unreachable):
+        // build our own status response, echoing the client's protocol version.
         let client_protocol_version = client_state.protocol_version();
         let (version_string, version_number) =
             if client_protocol_version.is_any() || client_protocol_version.is_unsupported() {
@@ -30,42 +49,13 @@ impl PacketHandler for StatusRequestPacket {
                 )
             };
 
-        let mirror_snapshot = server_state
-            .custom()
-            .mirror_status
-            .as_ref()
-            .and_then(|mirror| mirror.snapshot());
-
-        let mirror_component = mirror_snapshot
-            .as_ref()
-            .and_then(|snapshot| parse_mini_message(&snapshot.motd).ok());
-
-        let (motd, online_players, max_players, favicon) =
-            if let (Some(snapshot), Some(component)) =
-                (mirror_snapshot.as_ref(), mirror_component.as_ref())
-            {
-                (
-                    component,
-                    snapshot.online_players,
-                    snapshot.max_players,
-                    snapshot.favicon.clone().or_else(|| server_state.fav_icon()),
-                )
-            } else {
-                (
-                    server_state.motd(),
-                    server_state.online_players(),
-                    server_state.max_players(),
-                    server_state.fav_icon(),
-                )
-            };
-
         let status_response = StatusResponse::new(
             version_string,
             version_number,
-            motd,
-            online_players,
-            max_players,
-            favicon,
+            server_state.motd(),
+            server_state.online_players(),
+            server_state.max_players(),
+            server_state.fav_icon(),
         );
 
         let packet = StatusResponsePacket::from_status_response(&status_response);
